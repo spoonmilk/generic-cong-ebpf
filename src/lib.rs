@@ -35,7 +35,6 @@ pub trait GenericCongAvoidFlow {
     fn reset(&mut self) {}
 }
 
-/// Trait for congestion control algorithm (factory for flows)
 pub trait GenericCongAvoidAlg {
     type Flow: GenericCongAvoidFlow;
 

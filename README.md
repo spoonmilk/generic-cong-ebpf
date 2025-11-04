@@ -2,8 +2,8 @@
 
 ## Dependencies
 
-See Vagrantfile in upper-level directory.
-Requires cargo installed and libbpf-sys.
+The provided Vagrantfile should provide everything
+except for cargo and libbpf-sys.
 Make sure vmlinux is supported on your kernel version.
 
 ## Architecture
