@@ -1,30 +1,28 @@
-//! Minimal Generic Congestion Avoidance traits and types
+//! Congestion control traits and types from ccp-project/generic-cong-avoid
 
 pub const DEFAULT_SS_THRESH: u32 = 0x7fff_ffff;
 
 /// Measurements available to congestion control algorithms
 #[derive(Debug, Clone, Copy)]
 pub struct GenericCongAvoidMeasurements {
-    /// Bytes acknowledged
+    // In bytes
     pub acked: u32,
-    /// Whether this is a timeout event
     pub was_timeout: bool,
-    /// Packets selectively acknowledged (out-of-order)
+    /// In packets
     pub sacked: u32,
-    /// Packets lost
+    /// In packets
     pub loss: u32,
-    /// Round-trip time in microseconds
+    /// In microseconds
     pub rtt: u32,
-    /// Packets currently in flight
+    /// In Packets
     pub inflight: u32,
 }
 
-/// Trait for per-flow congestion control state
 pub trait GenericCongAvoidFlow {
     /// Get current congestion window in bytes
     fn curr_cwnd(&self) -> u32;
 
-    /// Set congestion window in bytes (called by framework)
+    /// Set congestion window in bytes
     fn set_cwnd(&mut self, cwnd: u32);
 
     /// Increase cwnd on successful ACK without loss

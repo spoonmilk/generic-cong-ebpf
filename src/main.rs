@@ -2,15 +2,12 @@ mod bpf;
 mod cubic;
 
 use anyhow::Result;
+use bpf::{DatapathEvent, EbpfDatapath};
 use clap::Parser;
+use cubic::Cubic;
+use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
-
-// Import from the lib target, not as a module
-use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow};
-
-use bpf::{DatapathEvent, EbpfDatapath};
-use cubic::Cubic;
 
 #[derive(Parser)]
 #[command(name = "ebpf-ccp-cubic")]
@@ -28,7 +25,7 @@ struct Args {
 
 struct FlowState {
     cubic: Cubic,
-    mss: u32, // Store MSS per-flow
+    mss: u32,
 }
 
 fn main() -> Result<()> {
@@ -39,25 +36,19 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(level.parse::<tracing::Level>().unwrap())
         .init();
-
     info!("Starting eBPF CUBIC congestion control");
     info!("  init_cwnd: {} packets", args.init_cwnd_pkts);
     info!("  mss: {} bytes", args.mss);
 
-    // Load eBPF datapath
+    // Load eBPF datapath and algorithm
     let mut datapath = EbpfDatapath::new()?;
     info!("eBPF datapath loaded and attached");
     info!("TCP congestion control 'ebpf_cubic' is now available");
-
-    // Create CUBIC algorithm instance (factory)
     let cubic_alg = Cubic::default();
 
     // Track active flows
     let mut flows: HashMap<u64, FlowState> = HashMap::new();
 
-    info!("Entering event loop...");
-
-    // Main event loop
     loop {
         let events = match datapath.poll(100) {
             Ok(e) => e,

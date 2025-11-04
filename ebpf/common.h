@@ -1,7 +1,7 @@
 #ifndef __COMMON_H
 #define __COMMON_H
 
-// TCP four-tuple flow key
+// TCP flows indexed by four-tuple
 struct flow_key {
     __u32 saddr;
     __u32 daddr;
