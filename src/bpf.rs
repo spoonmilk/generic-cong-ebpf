@@ -182,7 +182,7 @@ impl EbpfDatapath {
         let rb = rb_builder.build().context("Failed to build ring buffers")?;
         info!("Ring buffers configured");
 
-        // Spawn thread to poll ring buffers
+        // Thread polls ring buffers
         std::thread::spawn(move || {
             loop {
                 if let Err(e) = rb.poll(std::time::Duration::from_millis(100)) {
@@ -241,23 +241,18 @@ impl EbpfDatapath {
     }
 }
 
-// Mapping from flow_id to flow_key since for map lookups
+// Mapping from flow_id to flow_key for map lookups
 lazy_static! {
     static ref FLOW_KEY_MAP: Mutex<HashMap<u64, FlowKey>> = Mutex::new(HashMap::new());
 }
 
 fn flow_key_to_id(key: &FlowKey) -> u64 {
-    // Create a unique ID from the 4-tuple
     let id = ((key.saddr as u64) << 32) | (key.daddr as u64);
-
-    // Store the full flow key for later lookup
     FLOW_KEY_MAP.lock().unwrap().insert(id, *key);
-
     id
 }
 
 fn id_to_flow_key(id: u64) -> FlowKey {
-    // Retrieve flow key from cache
     FLOW_KEY_MAP
         .lock()
         .unwrap()

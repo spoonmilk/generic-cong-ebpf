@@ -28,7 +28,7 @@ struct {
     __type(value, struct cwnd_update);
 } cwnd_control SEC(".maps");
 
-// Helper to extract flow key from socket
+// Helper, extracts flow key from socket
 static __always_inline void get_flow_key(struct sock *sk, struct flow_key *key) {
     key->saddr = sk->__sk_common.skc_rcv_saddr;
     key->daddr = sk->__sk_common.skc_daddr;
