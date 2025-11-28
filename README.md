@@ -52,11 +52,31 @@ make test-quick # 3-second iperf test
 make test-full # 10 second iperf test w/ packet drops
 ```
 
->[!NOTE]
+> [!NOTE]
 > YOU MUST RUN WITH SUDO. IF THE MAKEFILE DOESN'T WORK FOR YOU, RUN THE SCRIPT
 > MANUALLY UNDER SUDO
 
-## Issues I've had
+## Troubleshooting
+
+### "File exists" error when running tests
+
+```bash
+make cleanup
+```
+
+Test targets automatically cleanup ebpf daemon on run
+
+### Manual cleanup
+
+If the automated cleanup fails, you can manually stop the daemon:
+
+```bash
+# Find and kill the daemon process
+sudo pkill -f ebpf-ccp-cubic
+
+# Verify ebpf_cubic is unregistered
+sysctl net.ipv4.tcp_available_congestion_control
+```
 
 ### Can't build because of cargo stuff
 

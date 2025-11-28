@@ -1,4 +1,4 @@
-.PHONY: all check ebpf rust clean test test-basic test-quick test-full install
+.PHONY: all check ebpf rust clean test test-basic test-quick test-full install cleanup
 
 all: check ebpf rust
 
@@ -14,15 +14,19 @@ clean:
 	$(MAKE) -C ebpf clean
 	cargo clean
 
-test-basic: all
+cleanup:
+	@echo "Cleaning up ebpf_cubic registration..."
+	sudo ./scripts/cleanup_ebpf_cubic.sh
+
+test-basic: cleanup all
 	@echo "Running basic registration test..."
 	sudo ./scripts/test_ebpf_cubic.sh basic
 
-test-quick: all
+test-quick: cleanup all
 	@echo "Running quick iperf test..."
 	sudo ./scripts/test_ebpf_cubic.sh quick
 
-test-full: all
+test-full: cleanup all
 	@echo "Running full iperf test..."
 	sudo ./scripts/test_ebpf_cubic.sh full
 

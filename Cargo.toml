@@ -14,6 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.4", features = ["derive"] }
+ctrlc = "3.4"
 lazy_static = "1.5.0"
 libbpf-rs = "0.25.0"
 libbpf-sys = "1.6.2"

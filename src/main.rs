@@ -7,6 +7,8 @@ use clap::Parser;
 use cubic::Cubic;
 use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, warn};
 
 #[derive(Parser)]
@@ -40,16 +42,22 @@ fn main() -> Result<()> {
     info!("  init_cwnd: {} packets", args.init_cwnd_pkts);
     info!("  mss: {} bytes", args.mss);
 
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        info!("Shutting down");
+        r.store(false, Ordering::SeqCst);
+    })?;
+
     // Load eBPF datapath and algorithm
     let mut datapath = EbpfDatapath::new()?;
     info!("eBPF datapath loaded and attached");
-    info!("TCP congestion control 'ebpf_cubic' is now available");
     let cubic_alg = Cubic::default();
 
     // Track active flows
     let mut flows: HashMap<u64, FlowState> = HashMap::new();
 
-    loop {
+    while running.load(Ordering::SeqCst) {
         let events = match datapath.poll(100) {
             Ok(e) => e,
             Err(e) => {
@@ -128,4 +136,10 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    info!("Shutting down eBPF CUBIC daemon...");
+    info!("Cleaning up {} active flows", flows.len());
+    drop(datapath);
+    info!("eBPF datapath detached - 'ebpf_cubic' unregistered from TCP");
+    Ok(())
 }
