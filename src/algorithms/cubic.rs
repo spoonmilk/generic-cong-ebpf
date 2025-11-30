@@ -1,9 +1,15 @@
-use crate::{GenericCongAvoidAlg, GenericCongAvoidFlow};
-use ebpf_ccp_cubic::GenericCongAvoidMeasurements;
+//! CUBIC congestion control algorithm implementation
+
+use super::{AlgorithmRunner, CwndUpdate};
+use crate::bpf::DatapathEvent;
+use anyhow::Result;
+use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow, GenericCongAvoidMeasurements};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 #[derive(Default)]
-pub struct Cubic {
+struct Cubic {
     pkt_size: u32,
     init_cwnd: u32,
 
@@ -141,5 +147,116 @@ impl GenericCongAvoidFlow for Cubic {
 
     fn reset(&mut self) {
         self.cubic_reset();
+    }
+}
+
+struct FlowState {
+    cubic: Cubic,
+    mss: u32,
+}
+
+pub struct CubicRunner {
+    cubic_alg: Cubic,
+    flows: HashMap<u64, FlowState>,
+}
+
+impl CubicRunner {
+    pub fn new(_init_cwnd_pkts: u32, _mss: u32) -> Self {
+        Self {
+            cubic_alg: Cubic::default(),
+            flows: HashMap::new(),
+        }
+    }
+}
+
+impl AlgorithmRunner for CubicRunner {
+    fn name(&self) -> &str {
+        "ebpf_cubic"
+    }
+
+    fn ebpf_path(&self) -> &str {
+        "ebpf/.output/datapath.bpf.o"
+    }
+
+    fn struct_ops_name(&self) -> &str {
+        "ebpf_cubic"
+    }
+
+    fn handle_event(&mut self, event: DatapathEvent) -> Result<Option<CwndUpdate>> {
+        match event {
+            DatapathEvent::FlowCreated {
+                flow_id,
+                init_cwnd,
+                mss,
+            } => {
+                info!(
+                    "Flow created: {:016x}, init_cwnd={} bytes, mss={} bytes",
+                    flow_id, init_cwnd, mss
+                );
+
+                let cubic = self.cubic_alg.new_flow(init_cwnd, mss);
+                self.flows.insert(flow_id, FlowState { cubic, mss });
+                Ok(None)
+            }
+
+            DatapathEvent::FlowClosed { flow_id } => {
+                info!("Flow closed: {:016x}", flow_id);
+                self.flows.remove(&flow_id);
+                Ok(None)
+            }
+
+            DatapathEvent::Measurement {
+                flow_id,
+                measurement,
+            } => {
+                if let Some(flow) = self.flows.get_mut(&flow_id) {
+                    // Handle timeout - reset CUBIC state
+                    if measurement.was_timeout {
+                        warn!("Timeout on flow {:016x} - resetting", flow_id);
+                        flow.cubic.reset();
+                        let fallback_cwnd =
+                            flow.cubic.curr_cwnd().max(measurement.inflight * flow.mss);
+                        flow.cubic.set_cwnd(fallback_cwnd);
+
+                        return Ok(Some(CwndUpdate {
+                            flow_id,
+                            cwnd_bytes: flow.cubic.curr_cwnd(),
+                        }));
+                    }
+
+                    // Run CUBIC algorithm
+                    let old_cwnd = flow.cubic.curr_cwnd();
+                    if measurement.loss > 0 || measurement.sacked > 0 {
+                        // Congestion detected - reduce
+                        flow.cubic.reduction(&measurement);
+                    } else if measurement.acked > 0 {
+                        // ACK received - increase
+                        flow.cubic.increase(&measurement);
+                    }
+
+                    let new_cwnd = flow.cubic.curr_cwnd();
+                    if old_cwnd != new_cwnd {
+                        debug!(
+                            "Flow {:016x}: cwnd {} -> {} bytes",
+                            flow_id, old_cwnd, new_cwnd
+                        );
+                    }
+
+                    // Return cwnd update
+                    Ok(Some(CwndUpdate {
+                        flow_id,
+                        cwnd_bytes: new_cwnd,
+                    }))
+                } else {
+                    warn!("Received measurement for unknown flow: {:016x}", flow_id);
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        info!("Cleaning up {} active CUBIC flows", self.flows.len());
+        self.flows.clear();
     }
 }

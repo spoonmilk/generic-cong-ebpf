@@ -1,46 +1,65 @@
+mod algorithms;
 mod bpf;
-mod cubic;
 
+use algorithms::AlgorithmRegistry;
 use anyhow::Result;
-use bpf::{DatapathEvent, EbpfDatapath};
+use bpf::EbpfDatapath;
 use clap::Parser;
-use cubic::Cubic;
-use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 #[derive(Parser)]
-#[command(name = "ebpf-ccp-cubic")]
-#[command(about = "CUBIC congestion control with eBPF datapath")]
+#[command(name = "ebpf-ccp")]
+#[command(about = "Congestion control with eBPF datapath")]
 struct Args {
+    /// Congestion control algorithm to use
+    #[arg(short, long, default_value = "cubic")]
+    algorithm: String,
+
+    /// Initial congestion window in packets
     #[arg(long, default_value = "10")]
     init_cwnd_pkts: u32,
 
+    /// Maximum segment size in bytes
     #[arg(long, default_value = "1448")]
     mss: u32,
 
+    /// Enable verbose debug logging
     #[arg(short, long)]
     verbose: bool,
-}
 
-struct FlowState {
-    cubic: Cubic,
-    mss: u32,
+    /// List available algorithms and exit
+    #[arg(long)]
+    list_algorithms: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Handle --list-algorithms flag
+    if args.list_algorithms {
+        println!("Available congestion control algorithms:");
+        for alg in AlgorithmRegistry::list() {
+            println!("  - {}", alg);
+        }
+        return Ok(());
+    }
 
     // Initialize logging
     let level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_max_level(level.parse::<tracing::Level>().unwrap())
         .init();
-    info!("Starting eBPF CUBIC congestion control");
+
+    // Get the algorithm implementation
+    let mut algorithm = AlgorithmRegistry::get(&args.algorithm, args.init_cwnd_pkts, args.mss)?;
+
+    info!("Starting eBPF congestion control");
+    info!("  algorithm: {}", algorithm.name());
     info!("  init_cwnd: {} packets", args.init_cwnd_pkts);
     info!("  mss: {} bytes", args.mss);
+    info!("  ebpf_path: {}", algorithm.ebpf_path());
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -49,14 +68,11 @@ fn main() -> Result<()> {
         r.store(false, Ordering::SeqCst);
     })?;
 
-    // Load eBPF datapath and algorithm
+    // Load eBPF datapath
     let mut datapath = EbpfDatapath::new()?;
     info!("eBPF datapath loaded and attached");
-    let cubic_alg = Cubic::default();
 
-    // Track active flows
-    let mut flows: HashMap<u64, FlowState> = HashMap::new();
-
+    // Main event loop
     while running.load(Ordering::SeqCst) {
         let events = match datapath.poll(100) {
             Ok(e) => e,
@@ -67,79 +83,35 @@ fn main() -> Result<()> {
         };
 
         for event in events {
-            match event {
-                DatapathEvent::FlowCreated {
-                    flow_id,
-                    init_cwnd,
-                    mss,
-                } => {
-                    info!(
-                        "Flow created: {:016x}, init_cwnd={} bytes, mss={} bytes",
-                        flow_id, init_cwnd, mss
-                    );
+            // Handle flow cleanup for closed flows
+            if let bpf::DatapathEvent::FlowClosed { flow_id } = &event {
+                datapath.cleanup_flow(*flow_id);
+            }
 
-                    let cubic = cubic_alg.new_flow(init_cwnd, mss);
-                    flows.insert(flow_id, FlowState { cubic, mss });
-                }
-
-                DatapathEvent::FlowClosed { flow_id } => {
-                    info!("Flow closed: {:016x}", flow_id);
-                    flows.remove(&flow_id);
-                    datapath.cleanup_flow(flow_id);
-                }
-
-                DatapathEvent::Measurement {
-                    flow_id,
-                    measurement,
-                } => {
-                    if let Some(flow) = flows.get_mut(&flow_id) {
-                        // Handle timeout - reset CUBIC state
-                        if measurement.was_timeout {
-                            warn!("Timeout on flow {:016x} - resetting", flow_id);
-                            flow.cubic.reset();
-                            let fallback_cwnd =
-                                flow.cubic.curr_cwnd().max(measurement.inflight * flow.mss);
-                            flow.cubic.set_cwnd(fallback_cwnd);
-
-                            if let Err(e) = datapath.update_cwnd(flow_id, flow.cubic.curr_cwnd()) {
-                                error!("Failed to update cwnd: {}", e);
-                            }
-                            continue;
-                        }
-
-                        // Run CUBIC algorithm
-                        let old_cwnd = flow.cubic.curr_cwnd();
-                        if measurement.loss > 0 || measurement.sacked > 0 {
-                            // Congestion detected - reduce
-                            flow.cubic.reduction(&measurement);
-                        } else if measurement.acked > 0 {
-                            // ACK received - increase
-                            flow.cubic.increase(&measurement);
-                        }
-
-                        let new_cwnd = flow.cubic.curr_cwnd();
-                        if old_cwnd != new_cwnd {
-                            debug!(
-                                "Flow {:016x}: cwnd {} -> {} bytes",
-                                flow_id, old_cwnd, new_cwnd
-                            );
-                        }
-
-                        // Send cwnd update back to eBPF
-                        if let Err(e) = datapath.update_cwnd(flow_id, flow.cubic.curr_cwnd()) {
-                            error!("Failed to update cwnd for flow {:016x}: {}", flow_id, e);
-                        }
-                    } else {
-                        warn!("Received measurement for unknown flow: {:016x}", flow_id);
+            // Let the algorithm handle the event
+            match algorithm.handle_event(event) {
+                Ok(Some(update)) => {
+                    // Send cwnd update back to eBPF
+                    if let Err(e) = datapath.update_cwnd(update.flow_id, update.cwnd_bytes) {
+                        error!(
+                            "Failed to update cwnd for flow {:016x}: {}",
+                            update.flow_id, e
+                        );
                     }
+                }
+                Ok(None) => {
+                    // No update needed
+                }
+                Err(e) => {
+                    error!("Algorithm error: {}", e);
                 }
             }
         }
     }
 
-    info!("Shutting down eBPF CUBIC daemon...");
-    info!("Cleaning up {} active flows", flows.len());
+    info!("Shutting down eBPF daemon...");
+    algorithm.cleanup();
     drop(datapath);
-    info!("eBPF datapath detached - 'ebpf_cubic' unregistered from TCP");
+    info!("eBPF datapath detached - '{}' unregistered from TCP", algorithm.name());
     Ok(())
 }
