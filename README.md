@@ -47,8 +47,8 @@ eBPF and userspace Rust component.
 There are three different configurations for testing functionality.
 
 ```bash
-make test # Run registration test, succeeds if ebpf-cubic hooks into struct_ops
-make test-quick # 3-second iperf test
+make test-register # Run registration test, succeeds if ebpf-cubic hooks into struct_ops
+make test/test-quick # 3-second iperf test
 make test-full # 10 second iperf test w/ packet drops
 ```
 
