@@ -29,58 +29,6 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10000);
     __type(key, struct flow_key);
-    __type(value, struct cwnd_update);
-} cwnd_control SEC(".maps");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(u32));
-} generic_flow_map SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(u32));
-} generic_ack_map SEC(".maps");
-
+    __type(value, struct user_update);
+} user_command_map SEC(".maps");
 

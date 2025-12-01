@@ -35,8 +35,9 @@ struct flow_event {
 } __attribute__((packed));
 
 // For updates to cwnd from user CUBIC
-struct cwnd_update {
+struct user_update {
     u32 cwnd_bytes;
+    u32 flow_command;
 };
 
 // Helper, extracts flow key from socket

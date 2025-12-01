@@ -25,7 +25,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10000);
     __type(key, struct flow_key);
-    __type(value, struct cwnd_update);
+    __type(value, struct user_update);
 } cwnd_control SEC(".maps");
 
 SEC("struct_ops/ebpf_cubic_init")
@@ -68,7 +68,7 @@ void BPF_PROG(ebpf_cubic_cong_avoid, struct sock *sk, __u32 ack, __u32 acked)
     struct tcp_sock *tp = tcp_sk(sk);
     struct measurement *m;
     struct flow_key key;
-    struct cwnd_update *update;
+    struct user_update *update;
     
     // Send measurement to userspace
     m = bpf_ringbuf_reserve(&measurements, sizeof(*m), 0);

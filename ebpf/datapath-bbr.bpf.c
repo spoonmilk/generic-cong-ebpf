@@ -25,7 +25,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10000);
     __type(key, struct flow_key);
-    __type(value, struct cwnd_update);
+    __type(value, struct user_update);
 } cwnd_control SEC(".maps");
 
 SEC("struct_ops/ebpf_bbr_init")
