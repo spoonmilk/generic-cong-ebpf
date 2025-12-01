@@ -27,7 +27,7 @@ vmlinux: vmlinux.h
 	@mkdir -p .output
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
 		-DCCA_NAME=ebpf_ccp_reno -DCCA_NAME_STR='"ebpf_ccp_reno"' \
-		-c datapath.bpf-reno.c -o .output/reno.bpf.o
+		-c datapath-reno.bpf.c -o .output/reno.bpf.o
 	@echo "eBPF object compiled: .output/reno.bpf.o (RENO)"
 
 clean:
