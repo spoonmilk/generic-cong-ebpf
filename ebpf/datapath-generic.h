@@ -6,8 +6,24 @@
 #include <bpf/bpf_endian.h>
 #include <sys/cdefs.h>
 
+#define MAX_FLOWS 1024
+
+// Flow state tracked in flow_map
+struct flow {
+    struct flow_key key;
+    // Congestion window // in bytes -> note that kernel
+    // tp->snd_cwnd is in packets - translate by * (1/tp->mss)
+    u32 cwnd;
+};
+
+// Flow rates - measured outside of struct_ops events
+struct flow_rates {
+    u32 rate_incoming; // Receive rate in bytes/sec
+    u32 rate_outgoing; // Send rate in bytes/sec
+};
+
+// Per-flow statistics
 struct flow_statistics {
- struct flow_key flow;
     u32 packets_in_flight;
     u32 bytes_in_flight;
     u32 bytes_pending;
@@ -15,14 +31,8 @@ struct flow_statistics {
     u8 was_timeout;
 };
 
-struct flow_rates {
-    struct flow_key flow;
-    u32 rate_incoming;
-    u32 rate_outgoing;
-};
-
+// Per-ACK statistics
 struct ack_statistics {
-    struct flow_key flow;
     u32 packets_acked;
     u32 bytes_acked;
     u32 packets_misordered;
@@ -33,4 +43,26 @@ struct ack_statistics {
     u32 now;
 };
 
+// TAKEN FROM EBPFCCA (Bokai Bi, Edward Wibuwo)
+static inline struct inet_connection_sock *inet_csk(const struct sock *sk) {
+  return (struct inet_connection_sock *)sk;
+}
+
+static inline void *inet_csk_ca(const struct sock *sk) {
+  return (void *)inet_csk(sk)->icsk_ca_priv;
+}
+
+static inline struct tcp_sock *tcp_sk(const struct sock *sk) {
+  return (struct tcp_sock *)sk;
+}
+
+static inline unsigned int tcp_left_out(const struct tcp_sock *tp) {
+  return tp->sacked_out + tp->lost_out;
+}
+
+static inline unsigned int tcp_packets_in_flight(const struct tcp_sock *tp) {
+  return tp->packets_out - tcp_left_out(tp) + tp->retrans_out;
+}
+
 #endif
+
