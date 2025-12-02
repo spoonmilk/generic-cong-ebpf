@@ -1,9 +1,9 @@
+#include "datapath-generic.h"
+#include "common.h"
 #include "vmlinux.h"
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#include <bpf/bpf_endian.h>
-#include "common.h"
-#include "datapath-generic.h"
 
 u64 num_flows = 0;
 
@@ -43,6 +43,13 @@ struct {
     __type(value, struct user_update);
 } user_command_map SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_FLOWS);
+    __type(key, struct flow_key);
+    __type(value, struct ecn);
+} ecns SEC(".maps");
+
 SEC("struct_ops/ebpf_generic_init")
 void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     struct flow_event *init_event;
@@ -53,21 +60,21 @@ void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     get_flow_key(sk, &key);
 
     // Check if connection already exists
-    if(bpf_map_lookup_elem(&flow_map, &key)) {
+    if (bpf_map_lookup_elem(&flow_map, &key)) {
         return;
     }
 
     // Create and insert flow into map
     struct flow fl = {
         .key = key,
-        .cwnd = tp->snd_cwnd * tp->mss_cache  // Store in bytes
+        .cwnd = tp->snd_cwnd * tp->mss_cache // Store in bytes
     };
     bpf_map_update_elem(&flow_map, &key, &fl, BPF_ANY);
     num_flows++;
 
     // Setup/Send flow creation event to userspace
     init_event = bpf_ringbuf_reserve(&flow_events, sizeof(*init_event), 0);
-    if(!init_event) { // -> should err probably?
+    if (!init_event) { // -> should err probably?
         return;
     }
 
@@ -91,8 +98,9 @@ void BPF_PROG(ebpf_generic_release, struct sock *sk) {
     num_flows--;
 
     // Cleanup/Send flow close event to userspace
-    release_event = bpf_ringbuf_reserve(&flow_events, sizeof(*release_event), 0);
-    if(!release_event) { // -> Should err probably?
+    release_event =
+        bpf_ringbuf_reserve(&flow_events, sizeof(*release_event), 0);
+    if (!release_event) { // -> Should err probably?
         return;
     }
 
@@ -111,24 +119,70 @@ static void measure_flack_signals(struct sock *sk) {
 
     // Setup message and flow key
     m = bpf_ringbuf_reserve(&measurements, sizeof(*m), 0);
-    if(!m) {
+    if (!m) {
         return;
     }
     __builtin_memset(m, 0, sizeof(*m));
     get_flow_key(sk, &key);
 
     m->flow = key;
-    
-
-    
-
-    
-
-
-
 }
 
+static void fill_flow_stats(struct sock *sk, struct flow *fl,
+                            struct flow_statistics *stats) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    stats->packets_in_flight = tcp_packets_in_flight(tp);
+    stats->bytes_in_flight = tp->packets_out * tp->mss_cache;
+    stats->bytes_pending = sk->sk_wmem_queued;
+    stats->rtt_sample_us = tp->srtt_us >> 3;
+}
 
+static void fill_ack_stats(struct sock *sk, u32 acked,
+                           struct ack_statistics *stats) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    stats->bytes_acked = acked;
+    stats->packets_acked = acked / tp->mss_cache;
+    stats->bytes_misordered = tp->sacked_out * tp->mss_cache;
+    stats->packets_misordered = tp->sacked_out;
 
+    struct flow_key *k;
+    get_flow_key(sk, k);
 
+    // TODO: fix ecn shit
+    struct ecn *ecn;
+    ecn = bpf_map_lookup_elem(&ecns, &k);
+    stats->ecn_packets = ecn ? *ecn : (struct ecn){0};
+}
 
+static void send_measurement(struct sock *sk, u32 acked, u8 was_timeout,
+                             u8 meas_type) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct measurement *m;
+    struct flow_key key;
+    struct flow *fl; 
+
+    fl = bpf_map_lookup_elem(&flow_map, &key);
+    bpf_ringbuf_reserve(&measurements, 0, sizeof(*m));
+
+    struct flow_statistics *fs;
+    struct ack_statistics *as;
+    fill_flow_stats(sk, fl, fs);
+    fs->was_timeout = was_timeout;
+
+    fill_ack_stats(sk, acked, as);
+
+    tp->snd_cwnd = fl->cwnd / tp->mss_cache;
+    sk->sk_pacing_rate = 
+
+    
+
+    // 1. Get flow key and lookup flow state
+    // 2. Reserve ringbuf space for measurement
+    // 3. Fill flow_stats using fill_flow_stats()
+    // 4. Fill ack_stats using fill_ack_stats()
+    // 5. Populate additional context (snd_cwnd, snd_ssthresh, pacing_rate,
+    // ca_state)
+    // 6. Set measurement_type
+    // 7. Submit to measurements ringbuf
+    // 8. Update fl->bytes_sent_since_last += acked (for rate tracking)
+}
