@@ -43,6 +43,60 @@ struct CwndUpdate {
     cwnd_bytes: u32,
 }
 
+#[repr(C, packed)]
+pub struct FlowStatistics {
+    pub packets_in_flight: u32,
+    pub bytes_in_flight: u32,
+    pub bytes_pending: u32,
+    pub rtt_sample_us: u32,
+    pub was_timeout: u8,
+    pub _pad1: [u8; 3],
+}
+
+#[repr(C, packed)]
+pub struct AckStatistics {
+    pub bytes_acked: u32,
+    pub packets_acked: u32,
+    pub bytes_misordered: u32,
+    pub packets_misordered: u32,
+    pub ecn_bytes: u32,
+    pub ecn_packets: u32,
+    pub lost_pkts_sample: u32,
+    pub now: u64,
+}
+
+#[repr(C, packed)]
+pub struct Measurement {
+    pub flow: FlowKey,
+    pub flow_stats: FlowStatistics,
+    pub ack_stats: AckStatistics,
+    pub snd_cwnd: u32,
+    pub snd_ssthresh: u32,
+    pub pacing_rate: u64,
+    pub ca_state: u8,
+    pub measurement_type: u8,
+    pub _pad: [u8; 2],
+}
+
+#[repr(C, packed)]
+pub struct FlowRates {
+    pub rate_incoming: u32,
+    pub rate_outgoing: u32,
+    pub last_updated: u64,
+}
+
+#[repr(C, packed)]
+pub struct UserUpdate {
+    pub cwnd_bytes: u32,
+    pub pacing_rate: u64,
+    pub ssthresh: u32,
+    pub use_pacing: u8,
+    pub use_cwnd: u8,
+    pub use_ssthresh: u8,
+    pub _pad: u8,
+    pub flow_command: u32,
+}
+
 pub enum DatapathEvent {
     FlowCreated {
         flow_id: u64,
