@@ -51,6 +51,7 @@ struct {
     __type(value, struct ecn);
 } ecns SEC(".maps");
 
+/// Building/Initializing connections
 SEC("struct_ops/ebpf_generic_init")
 void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     struct flow_event *init_event;
@@ -67,7 +68,8 @@ void BPF_PROG(ebpf_generic_init, struct sock *sk) {
 
     // Create and insert flow into map
     struct flow fl = {.key = key,
-                      .cwnd = tp->snd_cwnd * tp->mss_cache, // Store in bytes
+                      .cwnd = tp->snd_cwnd * tp->mss_cache,
+                      .pacing_rate = sk->sk_pacing_rate,
                       .bytes_delivered_since_last = 0,
                       .bytes_sent_since_last = 0,
                       .last_rate_update_ns = bpf_ktime_get_ns()};
@@ -89,6 +91,7 @@ void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     bpf_ringbuf_submit(init_event, 0);
 }
 
+/// Teardown/Release of connections
 SEC("struct_ops/ebpf_generic_release")
 void BPF_PROG(ebpf_generic_release, struct sock *sk) {
     struct flow_event *release_event;
@@ -96,8 +99,10 @@ void BPF_PROG(ebpf_generic_release, struct sock *sk) {
 
     // Remove from flow_map
     get_flow_key(sk, &key);
-    bpf_map_delete_elem(&flow_map, &key);
-    num_flows--;
+    if (bpf_map_lookup_elem(&flow_map, &key)) {
+        bpf_map_delete_elem(&flow_map, &key);
+        num_flows--;
+    }
 
     // Cleanup/Send flow close event to userspace
     release_event =
@@ -117,7 +122,7 @@ static void fill_flow_stats(struct sock *sk, struct flow *fl,
                             struct flow_statistics *stats) {
     struct tcp_sock *tp = tcp_sk(sk);
     stats->packets_in_flight = tcp_packets_in_flight(tp);
-    stats->bytes_in_flight = tp->packets_out * tp->mss_cache;
+    stats->bytes_in_flight = (u64)tp->packets_out * tp->mss_cache;
     stats->bytes_pending = sk->sk_wmem_queued;
     stats->rtt_sample_us = tp->srtt_us >> 3;
     stats->was_timeout = 0;
@@ -148,6 +153,7 @@ static void fill_ack_stats(struct sock *sk, u32 acked,
     stats->now = bpf_ktime_get_ns();
 }
 
+/// Send a whole measurement to userspace daemon
 static void send_measurement(struct sock *sk, u32 acked, u8 was_timeout,
                              u8 meas_type) {
     struct tcp_sock *tp = tcp_sk(sk);
@@ -184,9 +190,12 @@ static void send_measurement(struct sock *sk, u32 acked, u8 was_timeout,
 
     bpf_ringbuf_submit(m, 0);
 
+    // Update flow state and persist
     fl->bytes_sent_since_last += acked;
+    bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 }
 
+/// Apply cwnd/rate updates from daemon
 static void apply_user_updates(struct sock *sk) {
     struct tcp_sock *tp = tcp_sk(sk);
     struct flow_key key;
@@ -220,3 +229,129 @@ static void apply_user_updates(struct sock *sk) {
 
     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 }
+
+SEC("struct_ops/ebpf_generic_cong_avoid")
+void BPF_PROG(ebpf_generic_cong_avoid, struct sock *sk, __u32 ack,
+              __u32 acked) {
+    struct flow_key key;
+    struct flow *fl;
+
+    get_flow_key(sk, &key);
+    fl = bpf_map_lookup_elem(&flow_map, &key);
+    if (!fl) {
+        return;
+    }
+
+    fl->bytes_delivered_since_last += acked;
+    bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
+
+    send_measurement(sk, acked, 0, 0);
+    apply_user_updates(sk);
+}
+
+SEC("struct_ops/ebpf_generic_cong_control")
+void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
+              const struct rate_sample *rs) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct flow_key key;
+    struct flow *fl;
+
+    get_flow_key(sk, &key);
+    fl = bpf_map_lookup_elem(&flow_map, &key);
+    if (!fl) {
+        return;
+    }
+
+    fl->bytes_delivered_since_last += rs->delivered * tp->mss_cache;
+    bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
+
+    u32 acked = rs->acked_sacked;
+    send_measurement(sk, acked, 0, 1);
+    apply_user_updates(sk);
+}
+
+SEC("struct_ops/ebpf_generic_cwnd_event")
+void BPF_PROG(ebpf_generic_cwnd_event, struct sock *sk,
+              enum tcp_ca_event event) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct flow_key key;
+    struct ecn *ecn_info;
+    u8 was_timeout = 0;
+    u32 acked = 0;
+
+    get_flow_key(sk, &key);
+
+    // Track ECN marks
+    if (event == CA_EVENT_ECN_IS_CE || event == CA_EVENT_ECN_NO_CE) {
+        ecn_info = bpf_map_lookup_elem(&ecns, &key);
+        if (!ecn_info) {
+            struct ecn new_ecn = {0};
+            bpf_map_update_elem(&ecns, &key, &new_ecn, BPF_ANY);
+            ecn_info = bpf_map_lookup_elem(&ecns, &key);
+        }
+        if (ecn_info && event == CA_EVENT_ECN_IS_CE) {
+            ecn_info->ecn_packets++;
+            ecn_info->ecn_bytes += tp->mss_cache;
+            bpf_map_update_elem(&ecns, &key, ecn_info, BPF_ANY);
+        }
+    }
+
+    // Detect timeout events
+    if (event == CA_EVENT_CWND_RESTART || event == CA_EVENT_LOSS) {
+        was_timeout = 1;
+    }
+
+    // Send measurement for significant events
+    if (event == CA_EVENT_LOSS || event == CA_EVENT_CWND_RESTART ||
+        event == CA_EVENT_ECN_IS_CE) {
+        send_measurement(sk, acked, was_timeout, 2);
+    }
+}
+
+SEC("struct_ops/ebpf_generic_ssthresh")
+__u32 BPF_PROG(ebpf_generic_ssthresh, struct sock *sk) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct flow_key key;
+    struct user_update *update;
+
+    get_flow_key(sk, &key);
+    update = bpf_map_lookup_elem(&user_command_map, &key);
+
+    // Apply userspace override if available
+    if (update && update->use_ssthresh) {
+        return update->ssthresh / tp->mss_cache;
+    }
+
+    // Default: half of current cwnd, minimum 2
+    u32 ssthresh = tp->snd_cwnd >> 1;
+    return ssthresh < 2 ? 2 : ssthresh;
+}
+
+SEC("struct_ops/ebpf_generic_undo_cwnd")
+__u32 BPF_PROG(ebpf_generic_undo_cwnd, struct sock *sk) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct flow_key key;
+    struct flow *fl;
+
+    get_flow_key(sk, &key);
+    fl = bpf_map_lookup_elem(&flow_map, &key);
+
+    // Return last known cwnd from flow state, fallback to current
+    if (fl) {
+        return fl->cwnd / tp->mss_cache;
+    }
+
+    return tp->snd_cwnd;
+}
+
+SEC(".struct_ops")
+struct tcp_congestion_ops ebpf_generic = {
+    .init = (void *)ebpf_generic_init,
+    .release = (void *)ebpf_generic_release,
+    .cong_avoid = (void *)ebpf_generic_cong_avoid,
+    .cong_control = (void *)ebpf_generic_cong_control,
+    .cwnd_event = (void *)ebpf_generic_cwnd_event,
+    .ssthresh = (void *)ebpf_generic_ssthresh,
+    .undo_cwnd = (void *)ebpf_generic_undo_cwnd,
+    .name = "ebpf_ccp_generic",
+};
