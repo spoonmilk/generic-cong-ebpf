@@ -1,5 +1,6 @@
 mod algorithms;
 mod bpf;
+mod rate_tracker;
 
 use algorithms::AlgorithmRegistry;
 use anyhow::Result;

@@ -23,10 +23,10 @@ struct flow {
 };
 
 struct ecn {
-  // bytes corresponding to ecn-marked packets
-  u32 ecn_bytes;
-  // ecn-marked packets
-  u32 ecn_packets;
+    // bytes corresponding to ecn-marked packets
+    u32 ecn_bytes;
+    // ecn-marked packets
+    u32 ecn_packets;
 } _ecn = {0};
 
 // Flow rates - measured outside of struct_ops events
