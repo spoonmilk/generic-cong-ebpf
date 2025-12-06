@@ -19,7 +19,7 @@ struct flow {
 
     u64 bytes_delivered_since_last; // For rate_incoming calculation
     u64 bytes_sent_since_last;      // For rate_outgoing calculation
-    u64 last_rate_update_ns;        // Timestamp of last rate update
+    u64 last_rate_sample_ns;        // Timestamp of last rate sample
 };
 
 struct ecn {
@@ -29,11 +29,12 @@ struct ecn {
     u32 ecn_packets;
 } _ecn = {0};
 
-// Flow rates - measured outside of struct_ops events
+// Flow rates - computed in cong_control() callback every ~100ms
+// TODO: Written by eBPF, read by userspace when needed
 struct flow_rates {
     u32 rate_incoming; // Receive rate in bytes/sec
     u32 rate_outgoing; // Send rate in bytes/sec
-    u64 last_updated;
+    u64 last_updated;  // Timestamp of last rate calculation
 };
 
 // Per-flow statistics

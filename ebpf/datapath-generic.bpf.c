@@ -67,12 +67,13 @@ void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     }
 
     // Create and insert flow into map
+    // TODO: Initialize rate tracking fields (last_rate_sample_ns)
     struct flow fl = {.key = key,
                       .cwnd = tp->snd_cwnd * tp->mss_cache,
                       .pacing_rate = sk->sk_pacing_rate,
                       .bytes_delivered_since_last = 0,
                       .bytes_sent_since_last = 0,
-                      .last_rate_update_ns = bpf_ktime_get_ns()};
+                      .last_rate_sample_ns = bpf_ktime_get_ns()};
     bpf_map_update_elem(&flow_map, &key, &fl, BPF_ANY);
     num_flows++;
 
@@ -255,6 +256,8 @@ void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
     struct tcp_sock *tp = tcp_sk(sk);
     struct flow_key key;
     struct flow *fl;
+    u64 now;
+    u64 elapsed_ns;
 
     get_flow_key(sk, &key);
     fl = bpf_map_lookup_elem(&flow_map, &key);
@@ -263,6 +266,26 @@ void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
     }
 
     fl->bytes_delivered_since_last += rs->delivered * tp->mss_cache;
+
+    // Update rates
+    now = bpf_ktime_get_ns();
+    elapsed_ns = now - fl->last_rate_sample_ns;
+    if (elapsed_ns >= 100000000) {
+        u32 rate_incoming =
+            (fl->bytes_delivered_since_last * 1000000000) / elapsed_ns;
+        u32 rate_outgoing =
+            (fl->bytes_sent_since_last * 1000000000) / elapsed_ns;
+
+        struct flow_rates rates = {.rate_incoming = rate_incoming,
+                                   .rate_outgoing = rate_outgoing,
+                                   .last_updated = now};
+        bpf_map_update_elem(&flow_rate_map, &key, &rates, BPF_ANY);
+
+        fl->bytes_delivered_since_last = 0;
+        fl->bytes_sent_since_last = 0;
+        fl->last_rate_sample_ns = now;
+    }
+
     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 
     u32 acked = rs->acked_sacked;
