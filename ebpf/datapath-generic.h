@@ -4,7 +4,6 @@
 #include "common.h"
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
-#include <sys/cdefs.h>
 
 #define MAX_FLOWS 1024
 
@@ -29,8 +28,6 @@ struct ecn {
     u32 ecn_packets;
 } _ecn = {0};
 
-// Flow rates - computed in cong_control() callback every ~100ms
-// TODO: Written by eBPF, read by userspace when needed
 struct flow_rates {
     u32 rate_incoming; // Receive rate in bytes/sec
     u32 rate_outgoing; // Send rate in bytes/sec

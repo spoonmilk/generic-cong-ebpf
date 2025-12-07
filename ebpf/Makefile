@@ -4,7 +4,7 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
 .PHONY: all clean vmlinux
 
-all: vmlinux .output/cubic.bpf.o .output/reno.bpf.o
+all: vmlinux .output/cubic.bpf.o .output/reno.bpf.o .output/generic.bpf.o
 
 vmlinux.h:
 	@if [ ! -f /sys/kernel/btf/vmlinux ]; then \

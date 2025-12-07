@@ -1,7 +1,7 @@
 use super::{AlgorithmRunner, CwndUpdate};
 use crate::bpf::DatapathEvent;
-use crate::lib::{GenericAlgorithm, GenericFlow, Report};
 use anyhow::Result;
+use ebpf_ccp_cubic::{GenericAlgorithm, GenericFlow, Report};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -97,7 +97,11 @@ impl AlgorithmRunner for RenoRunner {
                     flow_id, init_cwnd, mss
                 );
 
-                let reno = self.reno_alg.new_flow(init_cwnd, mss);
+                let reno = Reno {
+                    mss,
+                    init_cwnd: f64::from(init_cwnd),
+                    cwnd: f64::from(init_cwnd),
+                };
                 self.flows.insert(flow_id, FlowState { reno, mss });
                 Ok(None)
             }
@@ -114,11 +118,11 @@ impl AlgorithmRunner for RenoRunner {
             } => {
                 if let Some(flow) = self.flows.get_mut(&flow_id) {
                     // Handle timeout - reset RENO state
-                    if measurement.was_timeout {
+                    if measurement.flow_stats.was_timeout != 0 {
                         warn!("Timeout on flow {:016x} - resetting", flow_id);
                         flow.reno.reset();
                         let fallback_cwnd =
-                            flow.reno.curr_cwnd().max(measurement.inflight * flow.mss);
+                            flow.reno.curr_cwnd().max(measurement.flow_stats.bytes_in_flight);
                         flow.reno.set_cwnd(fallback_cwnd);
 
                         return Ok(Some(CwndUpdate {
@@ -127,11 +131,40 @@ impl AlgorithmRunner for RenoRunner {
                         }));
                     }
 
+                    // Convert Measurement to Report for the algorithm
+                    let report = Report {
+                        flow_key: ebpf_ccp_cubic::FlowKey {
+                            saddr: measurement.flow.saddr,
+                            daddr: measurement.flow.daddr,
+                            sport: measurement.flow.sport,
+                            dport: measurement.flow.dport,
+                        },
+                        packets_in_flight: measurement.flow_stats.packets_in_flight,
+                        bytes_in_flight: measurement.flow_stats.bytes_in_flight,
+                        bytes_pending: measurement.flow_stats.bytes_pending,
+                        rtt_sample_us: measurement.flow_stats.rtt_sample_us,
+                        was_timeout: measurement.flow_stats.was_timeout != 0,
+                        bytes_acked: measurement.ack_stats.bytes_acked,
+                        packets_acked: measurement.ack_stats.packets_acked,
+                        bytes_misordered: measurement.ack_stats.bytes_misordered,
+                        packets_misordered: measurement.ack_stats.packets_misordered,
+                        ecn_bytes: measurement.ack_stats.ecn_bytes,
+                        ecn_packets: measurement.ack_stats.ecn_packets,
+                        lost_pkts_sample: measurement.ack_stats.lost_pkts_sample,
+                        rate_incoming: 0,
+                        rate_outgoing: 0,
+                        snd_cwnd: measurement.snd_cwnd,
+                        snd_ssthresh: measurement.snd_ssthresh,
+                        pacing_rate: measurement.pacing_rate,
+                        ca_state: measurement.ca_state,
+                        now: measurement.ack_stats.now,
+                    };
+
                     let old_cwnd = flow.reno.curr_cwnd();
-                    if measurement.loss > 0 || measurement.sacked > 0 {
-                        flow.reno.reduction(&measurement);
-                    } else if measurement.acked > 0 {
-                        flow.reno.increase(&measurement);
+                    if report.lost_pkts_sample > 0 {
+                        flow.reno.reduction(&report);
+                    } else if report.bytes_acked > 0 {
+                        flow.reno.increase(&report);
                     }
 
                     let new_cwnd = flow.reno.curr_cwnd();

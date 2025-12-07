@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use crate::bpf::DatapathEvent;
-use crate::lib::{GenericAlgorithm, GenericFlow, Report, FlowKey};
-use tracing::{info, warn};
 use anyhow::anyhow;
+use ebpf_ccp_cubic::{FlowKey, GenericAlgorithm, GenericFlow, Report};
+use tracing::info;
 
 use crate::algorithms::{AlgorithmRunner, CwndUpdate};
 

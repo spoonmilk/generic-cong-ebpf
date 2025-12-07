@@ -99,7 +99,7 @@ impl CwndUpdate {
     }
 }
 
-pub trait GenericAlgorithm {
+pub trait GenericAlgorithm: Send {
     fn name(&self) -> &str;
     fn create_flow(&self, init_cwnd: u32, mss: u32) -> Box<dyn GenericFlow>;
 }

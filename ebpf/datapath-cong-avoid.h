@@ -3,7 +3,6 @@
 
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
-#include <sys/cdefs.h>
 #include "common.h"
 
 // Measurements sent to userspace, taken from GenericCongAvoid

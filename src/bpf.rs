@@ -1,5 +1,5 @@
-use crate::lib::FlowKey;
 use anyhow::{Context, Result};
+use ebpf_ccp_cubic::FlowKey;
 use lazy_static::lazy_static;
 use libbpf_rs::{Link, MapCore, MapFlags, Object, ObjectBuilder, RingBufferBuilder};
 use std::collections::{HashMap, VecDeque};
@@ -18,6 +18,7 @@ struct FlowEvent {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct FlowStatistics {
     pub packets_in_flight: u32,
     pub bytes_in_flight: u32,
@@ -28,6 +29,7 @@ pub struct FlowStatistics {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct AckStatistics {
     pub bytes_acked: u32,
     pub packets_acked: u32,
@@ -40,6 +42,7 @@ pub struct AckStatistics {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct Measurement {
     pub flow: FlowKey,
     pub flow_stats: FlowStatistics,
@@ -53,6 +56,7 @@ pub struct Measurement {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 pub struct FlowRates {
     pub rate_incoming: u32,
     pub rate_outgoing: u32,
@@ -147,16 +151,25 @@ impl EbpfDatapath {
         rb_builder
             .add(&measurements_map, move |data: &[u8]| {
                 let m = unsafe { &*(data.as_ptr() as *const Measurement) };
-                let flow_id = flow_key_to_id(&m.flow);
+                // Copy the flow key to avoid taking reference to packed field
+                let flow = m.flow;
+                let flow_id = flow_key_to_id(&flow);
+
+                // Copy values to avoid taking references to packed fields
+                let bytes_acked = m.ack_stats.bytes_acked;
+                let lost_pkts_sample = m.ack_stats.lost_pkts_sample;
+                let rtt_sample_us = m.flow_stats.rtt_sample_us;
+                let bytes_in_flight = m.flow_stats.bytes_in_flight;
+                let measurement_type = m.measurement_type;
 
                 debug!(
                     "Measurement: flow={:016x}, acked={}, loss={}, rtt={}us, inflight={}, type={}",
                     flow_id,
-                    m.ack_stats.bytes_acked,
-                    m.ack_stats.lost_pkts_sample,
-                    m.flow_stats.rtt_sample_us,
-                    m.flow_stats.bytes_in_flight,
-                    m.measurement_type
+                    bytes_acked,
+                    lost_pkts_sample,
+                    rtt_sample_us,
+                    bytes_in_flight,
+                    measurement_type
                 );
 
                 events_clone
@@ -265,6 +278,20 @@ impl EbpfDatapath {
         }
     }
 
+    pub fn update_cwnd(&mut self, flow_id: u64, cwnd_bytes: u32) -> Result<()> {
+        let update = UserUpdate {
+            cwnd_bytes,
+            pacing_rate: 0,
+            ssthresh: 0,
+            use_pacing: 0,
+            use_cwnd: 1,
+            use_ssthresh: 0,
+            _pad: 0,
+            flow_command: 0,
+        };
+        self.send_user_update(flow_id, &update)
+    }
+
     pub fn send_user_update(&mut self, flow_id: u64, update: &UserUpdate) -> Result<()> {
         let map = self
             .obj
@@ -291,16 +318,6 @@ impl EbpfDatapath {
         map.update(key_bytes, value_bytes, MapFlags::ANY)
             .context("Failed to update user_command_map")?;
 
-        debug!(
-            "Sent user update for flow {:016x}: cwnd={} (use={}), pacing={} (use={}), ssthresh={} (use={})",
-            flow_id,
-            update.cwnd_bytes,
-            update.use_cwnd,
-            update.pacing_rate,
-            update.use_pacing,
-            update.ssthresh,
-            update.use_ssthresh
-        );
         Ok(())
     }
 }

@@ -3,7 +3,10 @@
 
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
-#include <sys/cdefs.h>
+
+#ifndef __always_inline
+#define __always_inline inline __attribute__((always_inline))
+#endif
 
 // TCP flows indexed by four-tuple
 struct flow_key {
