@@ -67,7 +67,6 @@ void BPF_PROG(ebpf_generic_init, struct sock *sk) {
     }
 
     // Create and insert flow into map
-    // TODO: Initialize rate tracking fields (last_rate_sample_ns)
     struct flow fl = {.key = key,
                       .cwnd = tp->snd_cwnd * tp->mss_cache,
                       .pacing_rate = sk->sk_pacing_rate,
@@ -150,7 +149,7 @@ static void fill_ack_stats(struct sock *sk, u32 acked,
         stats->ecn_bytes = 0;
     }
 
-    stats->lost_pckts_sample = tp->lost_out;
+    stats->lost_pkts_sample = tp->lost_out;
     stats->now = bpf_ktime_get_ns();
 }
 

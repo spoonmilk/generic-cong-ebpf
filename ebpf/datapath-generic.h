@@ -15,7 +15,7 @@ struct flow {
     // tp->snd_cwnd is in packets - translate by * (1/tp->mss)
     u32 cwnd;
     // Current pacing rate
-    u32 pacing_rate;
+    u64 pacing_rate;
 
     u64 bytes_delivered_since_last; // For rate_incoming calculation
     u64 bytes_sent_since_last;      // For rate_outgoing calculation
@@ -49,14 +49,14 @@ struct flow_statistics {
 
 // Per-ACK statistics
 struct ack_statistics {
-    u32 packets_acked;
     u32 bytes_acked;
-    u32 packets_misordered;
+    u32 packets_acked;
     u32 bytes_misordered;
-    u32 ecn_packets;
+    u32 packets_misordered;
     u32 ecn_bytes;
-    u32 lost_pckts_sample;
-    u32 now;
+    u32 ecn_packets;
+    u32 lost_pkts_sample;
+    u64 now;
 } __attribute__((packed));
 
 struct measurement {
