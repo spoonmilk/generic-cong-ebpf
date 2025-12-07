@@ -1,6 +1,7 @@
 //! Provides a runner for any algorithm
 
 pub mod cubic;
+pub mod generic_runner;
 pub mod reno;
 
 use crate::bpf::DatapathEvent;
@@ -31,12 +32,22 @@ impl AlgorithmRegistry {
         match name {
             "cubic" => Ok(Box::new(cubic::CubicRunner::new(init_cwnd_pkts, mss))),
             "reno" => Ok(Box::new(reno::RenoRunner::new(init_cwnd_pkts, mss))),
+            "generic-cubic" => Ok(Box::new(generic_runner::GenericRunner::new(
+                cubic::CubicAlgorithm,
+                init_cwnd_pkts * mss, // Convert packets to bytes
+                mss,
+            ))),
+            "generic-reno" => Ok(Box::new(generic_runner::GenericRunner::new(
+                reno::RenoAlgorithm,
+                init_cwnd_pkts * mss, // Convert packets to bytes
+                mss,
+            ))),
             _ => anyhow::bail!("Unknown algorithm: {}", name),
         }
     }
 
     /// List all available algorithms
     pub fn list() -> Vec<&'static str> {
-        vec!["cubic", "reno"]
+        vec!["cubic", "reno", "generic-cubic", "generic-reno"]
     }
 }

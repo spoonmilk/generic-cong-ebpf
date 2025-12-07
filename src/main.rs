@@ -1,6 +1,5 @@
 mod algorithms;
 mod bpf;
-mod rate_tracker;
 
 use algorithms::AlgorithmRegistry;
 use anyhow::Result;
@@ -73,7 +72,6 @@ fn main() -> Result<()> {
     let mut datapath = EbpfDatapath::new(algorithm.ebpf_path(), algorithm.struct_ops_name())?;
     info!("eBPF datapath loaded and attached");
 
-    // Main event loop
     while running.load(Ordering::SeqCst) {
         let events = match datapath.poll(100) {
             Ok(e) => e,

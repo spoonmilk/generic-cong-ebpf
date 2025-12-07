@@ -1,5 +1,5 @@
+use crate::lib::FlowKey;
 use anyhow::{Context, Result};
-use ebpf_ccp_cubic::GenericCongAvoidMeasurements;
 use lazy_static::lazy_static;
 use libbpf_rs::{Link, MapCore, MapFlags, Object, ObjectBuilder, RingBufferBuilder};
 use std::collections::{HashMap, VecDeque};
@@ -9,38 +9,12 @@ use tracing::{debug, info, warn};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-struct FlowKey {
-    saddr: u32,
-    daddr: u32,
-    sport: u16,
-    dport: u16,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct Measurement {
-    flow: FlowKey,
-    acked: u32,
-    sacked: u32,
-    loss: u32,
-    rtt: u32,
-    inflight: u32,
-    was_timeout: u8,
-    _pad: [u8; 3],
-}
-
-#[repr(C)]
 struct FlowEvent {
     event_type: u8,
     _pad: [u8; 3],
     flow: FlowKey,
     init_cwnd: u32,
     mss: u32,
-}
-
-#[repr(C)]
-struct CwndUpdate {
-    cwnd_bytes: u32,
 }
 
 #[repr(C, packed)]
@@ -90,9 +64,9 @@ pub struct UserUpdate {
     pub cwnd_bytes: u32,
     pub pacing_rate: u64,
     pub ssthresh: u32,
-    pub use_pacing: u8,
-    pub use_cwnd: u8,
-    pub use_ssthresh: u8,
+    pub use_pacing: u8,   // Whether to use pacing rate when updating
+    pub use_cwnd: u8,     // Whether to use cwnd when updating
+    pub use_ssthresh: u8, // Whether to override ssthresh
     pub _pad: u8,
     pub flow_command: u32,
 }
@@ -108,7 +82,7 @@ pub enum DatapathEvent {
     },
     Measurement {
         flow_id: u64,
-        measurement: GenericCongAvoidMeasurements,
+        measurement: Measurement,
     },
 }
 
@@ -175,18 +149,14 @@ impl EbpfDatapath {
                 let m = unsafe { &*(data.as_ptr() as *const Measurement) };
                 let flow_id = flow_key_to_id(&m.flow);
 
-                let measurement = GenericCongAvoidMeasurements {
-                    acked: m.acked,
-                    was_timeout: m.was_timeout != 0,
-                    sacked: m.sacked,
-                    loss: m.loss,
-                    rtt: m.rtt,
-                    inflight: m.inflight,
-                };
-
                 debug!(
-                    "Measurement: flow={:016x}, acked={}, loss={}, rtt={}us",
-                    flow_id, m.acked, m.loss, m.rtt
+                    "Measurement: flow={:016x}, acked={}, loss={}, rtt={}us, inflight={}, type={}",
+                    flow_id,
+                    m.ack_stats.bytes_acked,
+                    m.ack_stats.lost_pkts_sample,
+                    m.flow_stats.rtt_sample_us,
+                    m.flow_stats.bytes_in_flight,
+                    m.measurement_type
                 );
 
                 events_clone
@@ -194,7 +164,7 @@ impl EbpfDatapath {
                     .unwrap()
                     .push_back(DatapathEvent::Measurement {
                         flow_id,
-                        measurement,
+                        measurement: *m,
                     });
                 0
             })
@@ -261,16 +231,48 @@ impl EbpfDatapath {
         Ok(result)
     }
 
-    pub fn update_cwnd(&mut self, flow_id: u64, cwnd: u32) -> Result<()> {
-        // Get the cwnd_control map
+    pub fn cleanup_flow(&self, flow_id: u64) {
+        cleanup_flow_key(flow_id);
+    }
+
+    pub fn read_flow_rates(&self, flow_id: u64) -> Result<Option<FlowRates>> {
         let map = self
             .obj
             .maps()
-            .find(|m| m.name() == "cwnd_control")
-            .context("Failed to find cwnd_control map")?;
+            .find(|m| m.name() == "flow_rate_map")
+            .context("Failed to find flow_rate_map")?;
 
         let key = id_to_flow_key(flow_id);
-        let value = CwndUpdate { cwnd_bytes: cwnd };
+
+        let key_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &key as *const _ as *const u8,
+                std::mem::size_of::<FlowKey>(),
+            )
+        };
+
+        match map.lookup(key_bytes, MapFlags::ANY) {
+            Ok(Some(value_bytes)) => {
+                if value_bytes.len() >= std::mem::size_of::<FlowRates>() {
+                    let rates = unsafe { &*(value_bytes.as_ptr() as *const FlowRates) };
+                    Ok(Some(*rates))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Failed to lookup flow_rate_map: {}", e)),
+        }
+    }
+
+    pub fn send_user_update(&mut self, flow_id: u64, update: &UserUpdate) -> Result<()> {
+        let map = self
+            .obj
+            .maps()
+            .find(|m| m.name() == "user_command_map")
+            .context("Failed to find user_command_map")?;
+
+        let key = id_to_flow_key(flow_id);
 
         let key_bytes = unsafe {
             std::slice::from_raw_parts(
@@ -281,20 +283,25 @@ impl EbpfDatapath {
 
         let value_bytes = unsafe {
             std::slice::from_raw_parts(
-                &value as *const _ as *const u8,
-                std::mem::size_of::<CwndUpdate>(),
+                update as *const _ as *const u8,
+                std::mem::size_of::<UserUpdate>(),
             )
         };
 
         map.update(key_bytes, value_bytes, MapFlags::ANY)
-            .context("Failed to update cwnd_control map")?;
+            .context("Failed to update user_command_map")?;
 
-        debug!("Updated cwnd for flow {:016x}: {} bytes", flow_id, cwnd);
+        debug!(
+            "Sent user update for flow {:016x}: cwnd={} (use={}), pacing={} (use={}), ssthresh={} (use={})",
+            flow_id,
+            update.cwnd_bytes,
+            update.use_cwnd,
+            update.pacing_rate,
+            update.use_pacing,
+            update.ssthresh,
+            update.use_ssthresh
+        );
         Ok(())
-    }
-
-    pub fn cleanup_flow(&self, flow_id: u64) {
-        cleanup_flow_key(flow_id);
     }
 }
 

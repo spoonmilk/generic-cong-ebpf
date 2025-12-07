@@ -1,24 +1,25 @@
 use std::collections::HashMap;
 
 use crate::bpf::DatapathEvent;
-use ebpf_ccp_cubic::{GenericAlgorithm, kenericFlow};
-use tracing::warn;
+use crate::lib::{GenericAlgorithm, GenericFlow, Report, FlowKey};
+use tracing::{info, warn};
+use anyhow::anyhow;
 
-use crate::algorithms::AlgorithmRunner;
+use crate::algorithms::{AlgorithmRunner, CwndUpdate};
 
 pub struct GenericRunner<A: GenericAlgorithm> {
     algorithm: A,
     flows: HashMap<u64, Box<dyn GenericFlow>>,
-    init_cwd: u64,
+    init_cwnd: u32,
     mss: u32,
 }
 
 impl<A: GenericAlgorithm> GenericRunner<A> {
     pub fn new(algorithm: A, init_cwnd: u32, mss: u32) -> Self {
         Self {
-            algorithm: A,
+            algorithm,
             flows: HashMap::new(),
-            init_cwd: init_cwd,
+            init_cwnd,
             mss: mss,
         }
     }
@@ -29,7 +30,7 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
         self.algorithm.name()
     }
 
-    fn ebpf_path(&self) {
+    fn ebpf_path(&self) -> &str {
         "ebpf/.output/generic.bpf.o"
     }
 
@@ -47,8 +48,13 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                 init_cwnd,
                 mss,
             } => {
+                info!(
+                    "Flow created: {:016x}, init_cwnd={} bytes, mss={} bytes",
+                    flow_id, init_cwnd, mss
+                );
                 let new_flow = self.algorithm.create_flow(init_cwnd, mss);
-                self.flows.insert(flow_id, GenericFlow { new_flow, mss })
+                self.flows.insert(flow_id, new_flow);
+                Ok(None)
             }
 
             DatapathEvent::Measurement {
@@ -58,11 +64,18 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                 let flow = self
                     .flows
                     .get_mut(&flow_id)
-                    .ok_or_else(|| anyhow!("Unknown flow"))?;
+                    .ok_or_else(|| anyhow!("Unknown flow found"))?;
+
+                let flow_key = FlowKey {
+                    saddr: measurement.flow.saddr,
+                    daddr: measurement.flow.daddr,
+                    sport: measurement.flow.sport,
+                    dport: measurement.flow.dport,
+                };
 
                 // Convert Measurement → Report
                 let report = Report {
-                    flow_key: measurement.flow,
+                    flow_key: flow_key,
 
                     // Flow statistics
                     packets_in_flight: measurement.flow_stats.packets_in_flight,
@@ -107,6 +120,7 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
             }
 
             DatapathEvent::FlowClosed { flow_id } => {
+                info!("Flow closed: {:016x}", flow_id);
                 self.flows.remove(&flow_id);
                 Ok(None)
             }

@@ -1,7 +1,7 @@
 use super::{AlgorithmRunner, CwndUpdate};
 use crate::bpf::DatapathEvent;
+use crate::lib::{GenericAlgorithm, GenericFlow, Report};
 use anyhow::Result;
-use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow, GenericCongAvoidMeasurements};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
@@ -12,19 +12,7 @@ pub struct Reno {
     cwnd: f64,
 }
 
-impl GenericCongAvoidAlg for Reno {
-    type Flow = Self;
-
-    fn new_flow(&self, init_cwnd: u32, mss: u32) -> Self::Flow {
-        Reno {
-            mss,
-            init_cwnd: f64::from(init_cwnd),
-            cwnd: f64::from(init_cwnd),
-        }
-    }
-}
-
-impl GenericCongAvoidFlow for Reno {
+impl GenericFlow for Reno {
     fn curr_cwnd(&self) -> u32 {
         self.cwnd as u32
     }
@@ -33,12 +21,11 @@ impl GenericCongAvoidFlow for Reno {
         self.cwnd = f64::from(cwnd);
     }
 
-    fn increase(&mut self, m: &GenericCongAvoidMeasurements) {
-        // increase cwnd by 1 / cwnd per packet
-        self.cwnd += f64::from(self.mss) * (f64::from(m.acked) / self.cwnd);
+    fn increase(&mut self, report: &Report) {
+        self.cwnd += f64::from(self.mss) * (f64::from(report.bytes_acked) / self.cwnd);
     }
 
-    fn reduction(&mut self, _m: &GenericCongAvoidMeasurements) {
+    fn reduction(&mut self, _report: &Report) {
         self.cwnd /= 2.0;
         if self.cwnd <= self.init_cwnd {
             self.cwnd = self.init_cwnd;
@@ -47,6 +34,22 @@ impl GenericCongAvoidFlow for Reno {
 
     fn reset(&mut self) {
         self.cwnd = self.init_cwnd;
+    }
+}
+
+pub struct RenoAlgorithm;
+
+impl GenericAlgorithm for RenoAlgorithm {
+    fn name(&self) -> &str {
+        "reno"
+    }
+
+    fn create_flow(&self, init_cwnd: u32, mss: u32) -> Box<dyn GenericFlow> {
+        Box::new(Reno {
+            mss,
+            init_cwnd: f64::from(init_cwnd),
+            cwnd: f64::from(init_cwnd),
+        })
     }
 }
 

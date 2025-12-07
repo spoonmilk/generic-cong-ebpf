@@ -2,8 +2,8 @@
 
 use super::{AlgorithmRunner, CwndUpdate};
 use crate::bpf::DatapathEvent;
+use crate::lib::{GenericAlgorithm, GenericFlow, Report};
 use anyhow::Result;
-use ebpf_ccp_cubic::{GenericCongAvoidAlg, GenericCongAvoidFlow, GenericCongAvoidMeasurements};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -83,24 +83,7 @@ impl Cubic {
     }
 }
 
-impl GenericCongAvoidAlg for Cubic {
-    type Flow = Self;
-
-    fn new_flow(&self, init_cwnd: u32, mss: u32) -> Self::Flow {
-        Cubic {
-            pkt_size: mss,
-            init_cwnd: init_cwnd / mss,
-            cwnd: f64::from(init_cwnd / mss),
-            tcp_friendliness: true,
-            fast_convergence: true,
-            beta: 0.3f64,
-            c: 0.4f64,
-            ..Default::default()
-        }
-    }
-}
-
-impl GenericCongAvoidFlow for Cubic {
+impl GenericFlow for Cubic {
     fn curr_cwnd(&self) -> u32 {
         (self.cwnd * f64::from(self.pkt_size)) as u32
     }
@@ -109,9 +92,9 @@ impl GenericCongAvoidFlow for Cubic {
         self.cwnd = f64::from(cwnd) / f64::from(self.pkt_size);
     }
 
-    fn increase(&mut self, m: &GenericCongAvoidMeasurements) {
-        let f_rtt = Duration::from_micros(m.rtt as _);
-        let no_of_acks = ((f64::from(m.acked)) / (f64::from(self.pkt_size))) as u32;
+    fn increase(&mut self, report: &Report) {
+        let f_rtt = Duration::from_micros(report.rtt_sample_us as _);
+        let no_of_acks = ((f64::from(report.bytes_acked)) / (f64::from(self.pkt_size))) as u32;
         for _ in 0..no_of_acks {
             match self.d_min {
                 None => self.d_min = Some(f_rtt),
@@ -131,7 +114,7 @@ impl GenericCongAvoidFlow for Cubic {
         }
     }
 
-    fn reduction(&mut self, _m: &GenericCongAvoidMeasurements) {
+    fn reduction(&mut self, _report: &Report) {
         self.epoch_start = None;
         if self.cwnd < self.wlast_max && self.fast_convergence {
             self.wlast_max = self.cwnd * ((2.0 - self.beta) / 2.0);
@@ -147,6 +130,35 @@ impl GenericCongAvoidFlow for Cubic {
 
     fn reset(&mut self) {
         self.cubic_reset();
+    }
+}
+
+pub struct CubicAlgorithm;
+
+impl GenericAlgorithm for CubicAlgorithm {
+    fn name(&self) -> &str {
+        "cubic"
+    }
+
+    fn create_flow(&self, init_cwnd: u32, mss: u32) -> Box<dyn GenericFlow> {
+        Box::new(Cubic {
+            pkt_size: mss,
+            init_cwnd,
+            cwnd: f64::from(init_cwnd),
+            cwnd_cnt: 0.0,
+            tcp_friendliness: true,
+            beta: 0.7,
+            fast_convergence: true,
+            c: 0.4,
+            wlast_max: 0.0,
+            epoch_start: None,
+            origin_point: 0.0,
+            d_min: None,
+            wtcp: 0.0,
+            k: 0.0,
+            ack_cnt: 0.0,
+            cnt: 0.0,
+        })
     }
 }
 
