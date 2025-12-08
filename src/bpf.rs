@@ -99,14 +99,9 @@ pub struct EbpfDatapath {
 impl EbpfDatapath {
     pub fn new(ebpf_path: &str, struct_ops_name: &str) -> Result<Self> {
         info!("Loading eBPF object file: {}", ebpf_path);
-
-        // Load the BPF object file
         let obj_path = Path::new(ebpf_path);
         if !obj_path.exists() {
-            anyhow::bail!(
-                "eBPF object file not found: {:?}. Run 'make ebpf' first.",
-                obj_path
-            );
+            anyhow::bail!("eBPF object file not found: {:?}.", obj_path);
         }
 
         let mut builder = ObjectBuilder::default();
@@ -126,7 +121,6 @@ impl EbpfDatapath {
             .maps_mut()
             .find(|m| m.name() == struct_ops_name)
             .with_context(|| format!("Failed to find '{}' struct_ops map", struct_ops_name))?;
-
         let link = struct_ops_map
             .attach_struct_ops()
             .context("Failed to attach struct_ops to TCP stack")?;
@@ -149,16 +143,13 @@ impl EbpfDatapath {
         let mut rb_builder = RingBufferBuilder::new();
 
         rb_builder
-            .add(&measurements_map, move |data: &[u8]| {
+            .add(&measurements_map, move |data: &[u8]| { 
                 let m = unsafe { &*(data.as_ptr() as *const Measurement) };
-                // Copy the flow key to avoid taking reference to packed field
+
                 let flow = m.flow;
                 let flow_id = flow_key_to_id(&flow);
-
                 let rate_incoming = m.rates.rate_incoming;
                 let rate_outgoing = m.rates.rate_outgoing;
-
-                // Copy values to avoid taking references to packed fields
                 let bytes_acked = m.ack_stats.bytes_acked;
                 let lost_pkts_sample = m.ack_stats.lost_pkts_sample;
                 let rtt_sample_us = m.flow_stats.rtt_sample_us;
@@ -225,9 +216,6 @@ impl EbpfDatapath {
             .context("Failed to add flow_events ring buffer")?;
 
         let rb = rb_builder.build().context("Failed to build ring buffers")?;
-        info!("Ring buffers configured");
-
-        // Thread polls ring buffers
         std::thread::spawn(move || {
             loop {
                 if let Err(e) = rb.poll(std::time::Duration::from_millis(100)) {
