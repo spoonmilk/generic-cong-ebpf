@@ -20,7 +20,7 @@ impl<A: GenericAlgorithm> GenericRunner<A> {
             algorithm,
             flows: HashMap::new(),
             init_cwnd,
-            mss: mss,
+            mss,
         }
     }
 }
@@ -75,7 +75,7 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
 
                 // Convert Measurement → Report
                 let report = Report {
-                    flow_key: flow_key,
+                    flow_key,
 
                     // Flow statistics
                     packets_in_flight: measurement.flow_stats.packets_in_flight,

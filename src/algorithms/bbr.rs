@@ -20,13 +20,9 @@
 //! an implementation of the finer points of other BBR implementations
 //! (e.g. policing detection, STARTUP/DRAIN modes).
 
-use super::{AlgorithmRunner, CwndUpdate};
-use crate::bpf::DatapathEvent;
-use anyhow::Result;
 use ebpf_ccp_generic::{GenericAlgorithm, GenericFlow, Report};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// BBR flow state
 pub struct Bbr {
