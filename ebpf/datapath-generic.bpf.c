@@ -6,6 +6,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+char _license[] SEC("license") = "GPL";
+
 u64 num_flows = 0;
 
 // Map of all active dataflows - editable from userspace
@@ -240,24 +242,26 @@ static void apply_user_updates(struct sock *sk) {
     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 }
 
-SEC("struct_ops/ebpf_generic_cong_avoid")
-void BPF_PROG(ebpf_generic_cong_avoid, struct sock *sk, __u32 ack,
-              __u32 acked) {
-    struct flow_key key;
-    struct flow *fl;
-
-    get_flow_key(sk, &key);
-    fl = bpf_map_lookup_elem(&flow_map, &key);
-    if (!fl) {
-        return;
-    }
-
-    fl->bytes_delivered_since_last += acked;
-    bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
-
-    send_measurement(sk, acked, 0, 0);
-    apply_user_updates(sk);
-}
+// TODO: Figure out how to include both cong_avoid and cong_control? Needed? Idk
+//
+// SEC("struct_ops/ebpf_generic_cong_avoid")
+// void BPF_PROG(ebpf_generic_cong_avoid, struct sock *sk, __u32 ack,
+//               __u32 acked) {
+//     struct flow_key key;
+//     struct flow *fl;
+// 
+//     get_flow_key(sk, &key);
+//     fl = bpf_map_lookup_elem(&flow_map, &key);
+//     if (!fl) {
+//         return;
+//     }
+// 
+//     fl->bytes_delivered_since_last += acked;
+//     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
+// 
+//     send_measurement(sk, acked, 0, 0);
+//     apply_user_updates(sk);
+// }
 
 SEC("struct_ops/ebpf_generic_cong_control")
 void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
@@ -375,16 +379,20 @@ __u32 BPF_PROG(ebpf_generic_undo_cwnd, struct sock *sk) {
     return tp->snd_cwnd;
 }
 
+SEC("struct_ops/ebpf_generic_set_state")
+void BPF_PROG(ebpf_generic_set_state, struct sock *sk, __u8 new_state) {
+    // State changes handled by cwnd_event
+}
+
 SEC(".struct_ops")
-struct tcp_congestion_ops ebpf_generic = {
+struct tcp_congestion_ops ebpf_ccp_generic = {
     .init = (void *)ebpf_generic_init,
     .release = (void *)ebpf_generic_release,
-    .cong_avoid = (void *)ebpf_generic_cong_avoid,
-    .cong_control = (void *)ebpf_generic_cong_control,
-    .cwnd_event = (void *)ebpf_generic_cwnd_event,
     .ssthresh = (void *)ebpf_generic_ssthresh,
+    .cong_control = (void *)ebpf_generic_cong_control,
+    .set_state = (void *)ebpf_generic_set_state,
+    .cwnd_event = (void *)ebpf_generic_cwnd_event,
     .undo_cwnd = (void *)ebpf_generic_undo_cwnd,
     .name = "ebpf_ccp_generic",
 };
 
-char _license[] SEC("license") = "GPL";

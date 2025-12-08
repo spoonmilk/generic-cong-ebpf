@@ -1,14 +1,14 @@
 [package]
-name = "ccp-bpf-cubic"
+name = "ccp-bpf-generic"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "ebpf-ccp-cubic"
+name = "ebpf-ccp-generic"
 path = "src/main.rs"
 
 [lib]
-name = "ebpf_ccp_cubic"
+name = "ebpf_ccp_generic"
 path = "src/lib.rs"
 
 [dependencies]

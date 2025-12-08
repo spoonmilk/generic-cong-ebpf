@@ -3,7 +3,7 @@
 use super::{AlgorithmRunner, CwndUpdate};
 use crate::bpf::DatapathEvent;
 use anyhow::Result;
-use ebpf_ccp_cubic::{GenericAlgorithm, GenericFlow, Report};
+use ebpf_ccp_generic::{GenericAlgorithm, GenericFlow, Report};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -243,8 +243,10 @@ impl AlgorithmRunner for CubicRunner {
                     if measurement.flow_stats.was_timeout != 0 {
                         warn!("Timeout on flow {:016x} - resetting", flow_id);
                         flow.cubic.reset();
-                        let fallback_cwnd =
-                            flow.cubic.curr_cwnd().max(measurement.flow_stats.bytes_in_flight);
+                        let fallback_cwnd = flow
+                            .cubic
+                            .curr_cwnd()
+                            .max(measurement.flow_stats.bytes_in_flight);
                         flow.cubic.set_cwnd(fallback_cwnd);
 
                         return Ok(Some(CwndUpdate {
@@ -255,7 +257,7 @@ impl AlgorithmRunner for CubicRunner {
 
                     // Convert Measurement to Report for the algorithm
                     let report = Report {
-                        flow_key: ebpf_ccp_cubic::FlowKey {
+                        flow_key: ebpf_ccp_generic::FlowKey {
                             saddr: measurement.flow.saddr,
                             daddr: measurement.flow.daddr,
                             sport: measurement.flow.sport,

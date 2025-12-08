@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::bpf::DatapathEvent;
 use anyhow::anyhow;
-use ebpf_ccp_cubic::{FlowKey, GenericAlgorithm, GenericFlow, Report};
+use ebpf_ccp_generic::{FlowKey, GenericAlgorithm, GenericFlow, Report};
 use tracing::info;
 
 use crate::algorithms::{AlgorithmRunner, CwndUpdate};

@@ -10,7 +10,7 @@ LATENCY="20ms"
 BANDWIDTH="10mbit"
 LOSS="1%"
 TEST_DURATION=10
-BPF_BINARY_PATH="./target/release/ebpf-ccp-cubic"
+BPF_BINARY_PATH="./target/release/ebpf-ccp-generic"
 ALGORITHM="${ALGORITHM:-cubic}"  # Default to cubic if not specified
 
 # Colors for output
