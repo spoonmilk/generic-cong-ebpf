@@ -17,14 +17,14 @@ clean:
 	cargo clean
 
 cleanup:
-	@echo "Cleaning up congestion control registrations..."
 	sudo ./scripts/cleanup_ebpf_cubic.sh
+	sudo ./scripts/cleanup_generic.sh
 
 list-algorithms: rust
 	./target/release/ebpf-ccp-cubic --list-algorithms
 
 test-register: cleanup all
-	sudo ./scripts/test_ebpf_cubic.sh basic
+	sudo ALGORITHM=generic-cubic ./scripts/test_ebpf_cubic.sh basic
 
 # Quick tests (3 seconds)
 test-quick: cleanup all

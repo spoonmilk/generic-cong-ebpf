@@ -35,7 +35,7 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
     }
 
     fn struct_ops_name(&self) -> &str {
-        "ebpf_ccp_generic"
+        "ebpf_ccp_gen"
     }
 
     fn handle_event(

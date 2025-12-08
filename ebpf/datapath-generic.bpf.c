@@ -385,7 +385,7 @@ void BPF_PROG(ebpf_generic_set_state, struct sock *sk, __u8 new_state) {
 }
 
 SEC(".struct_ops")
-struct tcp_congestion_ops ebpf_ccp_generic = {
+struct tcp_congestion_ops ebpf_ccp_gen = {
     .init = (void *)ebpf_generic_init,
     .release = (void *)ebpf_generic_release,
     .ssthresh = (void *)ebpf_generic_ssthresh,
@@ -393,6 +393,6 @@ struct tcp_congestion_ops ebpf_ccp_generic = {
     .set_state = (void *)ebpf_generic_set_state,
     .cwnd_event = (void *)ebpf_generic_cwnd_event,
     .undo_cwnd = (void *)ebpf_generic_undo_cwnd,
-    .name = "ebpf_ccp_generic",
+    .name = "ebpf_ccp_gen",
 };
 

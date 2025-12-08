@@ -176,7 +176,7 @@ start_bpf_daemon() {
             EXPECTED_CCA="ebpf_ccp_reno"
             ;;
         generic-cubic|generic-reno)
-            EXPECTED_CCA="ebpf_ccp_generic"
+            EXPECTED_CCA="ebpf_ccp_gen"
             ;;
         *)
             EXPECTED_CCA="ebpf_ccp_${ALGORITHM}"
