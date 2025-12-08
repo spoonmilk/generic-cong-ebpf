@@ -1,5 +1,6 @@
 //! Provides a runner for any algorithm
 
+pub mod bbr;
 pub mod cubic;
 pub mod generic_runner;
 pub mod reno;
@@ -23,6 +24,7 @@ pub trait AlgorithmRunner: Send {
 pub struct CwndUpdate {
     pub flow_id: u64,
     pub cwnd_bytes: u32,
+    pub pacing_rate: Option<u64>, // Optional pacing rate (bytes/sec)
 }
 
 pub struct AlgorithmRegistry;
@@ -42,12 +44,23 @@ impl AlgorithmRegistry {
                 init_cwnd_pkts * mss, // Convert packets to bytes
                 mss,
             ))),
+            "generic-bbr" => Ok(Box::new(generic_runner::GenericRunner::new(
+                bbr::BbrAlgorithm,
+                init_cwnd_pkts * mss, // Convert packets to bytes
+                mss,
+            ))),
             _ => anyhow::bail!("Unknown algorithm: {}", name),
         }
     }
 
     /// List all available algorithms
     pub fn list() -> Vec<&'static str> {
-        vec!["cubic", "reno", "generic-cubic", "generic-reno"]
+        vec![
+            "cubic",
+            "reno",
+            "generic-cubic",
+            "generic-reno",
+            "generic-bbr",
+        ]
     }
 }

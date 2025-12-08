@@ -102,6 +102,11 @@ pub trait GenericFlow: Send {
     /// Set congestion window in bytes
     fn set_cwnd(&mut self, cwnd: u32);
 
+    /// Optional: Get current pacing rate in bytes/sec
+    fn curr_pacing_rate(&self) -> Option<u64> {
+        None // Default: no pacing rate control
+    }
+
     /// Increase cwnd on successful ACK without loss
     fn increase(&mut self, report: &Report);
 

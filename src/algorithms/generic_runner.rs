@@ -111,10 +111,11 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                     flow.increase(&report);
                 }
 
-                // Return cwnd update
+                // Return cwnd and optionally pacing rate update
                 Ok(Some(CwndUpdate {
                     flow_id,
                     cwnd_bytes: flow.curr_cwnd(),
+                    pacing_rate: flow.curr_pacing_rate(),
                 }))
             }
 

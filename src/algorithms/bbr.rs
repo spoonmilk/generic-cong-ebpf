@@ -1,6 +1,8 @@
+//! BBR congestion control algorithm implementation
+//!
 //! Linux source: `net/ipv4/tcp_bbr.c`
 //!
-//! model of the network path:
+//! Model of the network path:
 //! ```no-run
 //!    bottleneck_bandwidth = windowed_max(delivered / elapsed, 10 round trips)
 //!    min_rtt = windowed_min(rtt, 10 seconds)
@@ -13,149 +15,323 @@
 //! A BBR flow starts in STARTUP, and ramps up its sending rate quickly.
 //! When it estimates the pipe is full, it enters DRAIN to drain the queue.
 //! In steady state a BBR flow only uses `PROBE_BW` and `PROBE_RTT`.
-//! A long-lived BBR flow spends the vast majority of its time remaining
-//! (repeatedly) in `PROBE_BW`, fully probing and utilizing the pipe's bandwidth
-//! in a fair manner, with a small, bounded queue. *If* a flow has been
-//! continuously sending for the entire `min_rtt` window, and hasn't seen an RTT
-//! sample that matches or decreases its `min_rtt` estimate for 10 seconds, then
-//! it briefly enters `PROBE_RTT` to cut inflight to a minimum value to re-probe
-//! the path's two-way propagation delay (`min_rtt`). When exiting `PROBE_RTT`, if
-//! we estimated that we reached the full bw of the pipe then we enter `PROBE_BW`;
-//! otherwise we enter STARTUP to try to fill the pipe.
 //!
-//! The goal of `PROBE_RTT` mode is to have BBR flows cooperatively and
-//! periodically drain the bottleneck queue, to converge to measure the true
-//! `min_rtt` (unloaded propagation delay). This allows the flows to keep queues
-//! small (reducing queuing delay and packet loss) and achieve fairness among
-//! BBR flows.
-//!
-//! The `min_rtt` filter window is 10 seconds. When the `min_rtt` estimate expires,
-//! we enter `PROBE_RTT` mode and cap the cwnd at `bbr_cwnd_min_target=4` packets.
-//! After at least `bbr_probe_rtt_mode_ms=200ms` and at least one packet-timed
-//! round trip elapsed with that flight size <= 4, we leave `PROBE_RTT` mode and
-//! re-enter the previous mode. BBR uses 200ms to approximately bound the
-//! performance penalty of `PROBE_RTT`'s cwnd capping to roughly 2% (200ms/10s).
-//!
-//! Portus note:
 //! This implementation does `PROBE_BW` and `PROBE_RTT`, but leaves as future work
 //! an implementation of the finer points of other BBR implementations
-//! (e.g. policing detection).
+//! (e.g. policing detection, STARTUP/DRAIN modes).
 
-use portus::ipc::Ipc;
-use portus::lang::Scope;
-use portus::{CongAlg, Datapath, DatapathInfo, DatapathTrait, Report};
+use super::{AlgorithmRunner, CwndUpdate};
+use crate::bpf::DatapathEvent;
+use anyhow::Result;
+use ebpf_ccp_generic::{GenericAlgorithm, GenericFlow, Report};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-pub struct Bbr<T: Ipc> {
-    control_channel: Datapath<T>,
-    sc: Scope,
+/// BBR flow state
+pub struct Bbr {
+    mss: u32,
+    init_cwnd: u32,
+
+    // Current congestion window (in bytes)
+    cwnd: u32,
+
+    // Current pacing rate (bytes/sec)
+    pacing_rate: u64,
+
+    // BBR state
+    mode: BbrMode,
     probe_rtt_interval: Duration,
-    bottle_rate: f64,
-    bottle_rate_timeout: Instant,
+
+    // Bottleneck bandwidth estimate (bytes/sec)
+    bottleneck_bw: f64,
+    bottleneck_bw_timeout: Instant,
+
+    // Minimum RTT estimate
     min_rtt_us: u32,
     min_rtt_timeout: Instant,
-    curr_mode: BbrMode,
-    mss: u32,
-    init: bool,
+
+    // Pacing and probing state
+    probe_bw_state: u32, // 0=down, 1=cruise, 2=up
+    probe_bw_timer: Instant,
+    probe_rtt_done_timestamp: Option<Instant>,
+    probe_rtt_inflight_reached: bool,
+
     start: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum BbrMode {
     ProbeBw,
     ProbeRtt,
 }
 
 pub const PROBE_RTT_INTERVAL_SECONDS: i64 = 10;
+const PROBE_RTT_DURATION_MS: u64 = 200;
+const MIN_CWND_PACKETS: u32 = 4;
 
-#[derive(Clone)]
-pub struct BbrConfig {
-    pub probe_rtt_interval: Duration,
-    // TODO make more things configurable
-}
+impl Bbr {
+    fn new(init_cwnd: u32, mss: u32) -> Self {
+        let now = Instant::now();
+        let probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SECONDS as u64);
+        let initial_bw = 125_000.0; // 1 Mbps in bytes/sec
 
-impl<T: Ipc> Bbr<T> {
-    fn install_update(&self, update: &[(&str, u32)]) {
-        if let Err(err) = self.control_channel.update_field(&self.sc, update) {
-            warn!(?err, "Cwnd and rate update error");
+        Self {
+            mss,
+            init_cwnd,
+            cwnd: init_cwnd,
+            pacing_rate: initial_bw as u64,
+            mode: BbrMode::ProbeBw,
+            probe_rtt_interval,
+            bottleneck_bw: initial_bw,
+            bottleneck_bw_timeout: now + probe_rtt_interval,
+            min_rtt_us: 1_000_000, // Initial estimate: 1 second
+            min_rtt_timeout: now + probe_rtt_interval,
+            probe_bw_state: 0,
+            probe_bw_timer: now,
+            probe_rtt_done_timestamp: None,
+            probe_rtt_inflight_reached: false,
+            start: now,
         }
     }
 
-    // replaces the variables in the probe bw program if the bottle rate or min_rtt changes
-    fn replace_probe_bw_rate(&self) {
-        let three_fourths_rate = (self.bottle_rate * 0.75) as u32;
-        let rate = self.bottle_rate as u32;
-        let five_fourths_rate = (self.bottle_rate * 1.25) as u32;
-        let cwnd_cap = (self.bottle_rate * 2.0 * f64::from(self.min_rtt_us) / 1e6) as u32;
-        self.install_update(&[
-            ("bottleRate", rate),
-            ("threeFourthsRate", three_fourths_rate),
-            ("fiveFourthsRate", five_fourths_rate),
-            ("cwndCap", cwnd_cap),
-        ]);
-        info!(
-            cwnd = cwnd_cap,
-            down_rate = three_fourths_rate as f64 / 125_000.0,
-            bottle_rate = self.bottle_rate / 125_000.0,
-            up_rate = five_fourths_rate as f64 / 125_000.0,
-            "PROBE_BW: updating rate"
-        );
+    /// Calculate target pacing rate based on current BW estimate and gain
+    fn calculate_pacing_rate(&self) -> u64 {
+        let gain = match self.mode {
+            BbrMode::ProbeBw => {
+                match self.probe_bw_state {
+                    0 => 0.75, // Drain mode
+                    1 => 1.0,  // Cruise mode
+                    _ => 1.25, // Probe mode
+                }
+            }
+            BbrMode::ProbeRtt => 0.75, // Reduce pacing to drain queue
+        };
+
+        (self.bottleneck_bw * gain) as u64
     }
 
-    fn install_probe_bw(&mut self) -> Scope {
-        // first, install the rate and cwnd for state 0 for state 0
-        let min_rtt = self.min_rtt_us as u32;
-        let three_fourths_rate = (self.bottle_rate * 0.75) as u32;
-        let rate = self.bottle_rate as u32;
-        let five_fourths_rate = (self.bottle_rate * 1.25) as u32;
-        let cwnd_cap = (self.bottle_rate * 2.0 * f64::from(self.min_rtt_us) / 1e6) as u32;
+    /// Calculate target cwnd based on BDP estimate
+    fn calculate_target_cwnd(&self) -> u32 {
+        // cwnd = gain * BDP = gain * bottleneck_bw * min_rtt
+        let bdp = self.bottleneck_bw * (f64::from(self.min_rtt_us) / 1_000_000.0);
+        let gain = match self.mode {
+            BbrMode::ProbeBw => {
+                match self.probe_bw_state {
+                    0 => 0.75, // Drain mode
+                    1 => 1.0,  // Cruise mode
+                    _ => 1.25, // Probe mode
+                }
+            }
+            BbrMode::ProbeRtt => 0.5, // Reduce to probe min RTT
+        };
 
-        info!(
-            cwnd = cwnd_cap,
-            down_rate = three_fourths_rate as f64 / 125_000.0,
-            bottle_rate_Mbps = self.bottle_rate / 125_000.0,
-            up_rate = five_fourths_rate as f64 / 125_000.0,
-            min_rtt_us = min_rtt,
-            "switching to PROBE_BW"
-        );
-
-        self.install_update(&[("Cwnd", cwnd_cap), ("Rate", five_fourths_rate)]);
-        self.control_channel
-            .set_program(
-                "probe_bw",
-                Some(&[
-                    ("cwndCap", cwnd_cap),
-                    ("bottleRate", rate),
-                    ("threeFourthsRate", three_fourths_rate),
-                    ("fiveFourthsRate", five_fourths_rate),
-                ]),
-            )
-            .unwrap()
+        let target = (bdp * gain * 2.0) as u32; // 2x BDP for cwnd
+        target.max(MIN_CWND_PACKETS * self.mss)
     }
 
-    fn get_probe_bw_fields(&mut self, m: &Report) -> Option<(u32, u32, f64, u32)> {
-        let rtt = m
-            .get_field(&String::from("Report.minrtt"), &self.sc)
-            .expect("expected minrtt field in returned measurement") as u32;
-        let loss = m
-            .get_field(&String::from("Report.loss"), &self.sc)
-            .expect("expected loss field in returned measurement") as u32;
-        let rate = m
-            .get_field(&String::from("Report.rate"), &self.sc)
-            .expect("expected rate field in returned measurement") as f64;
-        let state = m
-            .get_field(&String::from("Report.pulseState"), &self.sc)
-            .expect("expected state field in returned measurement") as u32;
-        Some((loss, rtt, rate, state))
+    /// Update bandwidth estimate from throughput measurement
+    fn update_bandwidth(&mut self, report: &Report) {
+        if report.bytes_acked == 0 {
+            return;
+        }
+
+        // Estimate throughput from this ACK
+        let rtt_sec = f64::from(report.rtt_sample_us) / 1_000_000.0;
+        if rtt_sec > 0.0 {
+            let throughput = f64::from(report.bytes_acked) / rtt_sec;
+
+            // Update bottleneck bandwidth estimate (windowed max)
+            if throughput > self.bottleneck_bw {
+                self.bottleneck_bw = throughput;
+                self.bottleneck_bw_timeout = Instant::now() + self.probe_rtt_interval;
+                debug!(
+                    "Updated bottleneck_bw to {:.2} Mbps",
+                    self.bottleneck_bw / 125_000.0
+                );
+            }
+        }
     }
 
-    fn get_probe_minrtt(&mut self, m: &Report) -> u32 {
-        m.get_field("Report.minrtt", &self.sc)
-            .expect("expected minrtt field in returned measurement") as u32
+    /// Update min RTT estimate
+    fn update_min_rtt(&mut self, rtt_us: u32) {
+        let now = Instant::now();
+
+        if rtt_us < self.min_rtt_us {
+            self.min_rtt_us = rtt_us;
+            self.min_rtt_timeout = now + self.probe_rtt_interval;
+            debug!("Updated min_rtt to {} us", self.min_rtt_us);
+        }
+    }
+
+    /// Handle PROBE_BW state machine
+    fn handle_probe_bw(&mut self, report: &Report) {
+        let now = Instant::now();
+        let min_rtt = Duration::from_micros(self.min_rtt_us as u64);
+
+        // State transitions based on time in current state
+        let time_in_state = now.duration_since(self.probe_bw_timer);
+
+        match self.probe_bw_state {
+            0 => {
+                // Drain state (0.75x) - stay for 1 RTT
+                if time_in_state >= min_rtt {
+                    self.probe_bw_state = 1;
+                    self.probe_bw_timer = now;
+                    debug!("PROBE_BW: drain -> cruise");
+                }
+            }
+            1 => {
+                // Cruise state (1.0x) - stay for 2 RTTs
+                if time_in_state >= min_rtt * 2 {
+                    self.probe_bw_state = 2;
+                    self.probe_bw_timer = now;
+                    debug!("PROBE_BW: cruise -> probe");
+                }
+            }
+            _ => {
+                // Probe state (1.25x) - stay for 8 RTTs
+                if time_in_state >= min_rtt * 8 {
+                    self.probe_bw_state = 0;
+                    self.probe_bw_timer = now;
+                    debug!("PROBE_BW: probe -> drain");
+                }
+            }
+        }
+
+        // Check if we need to enter PROBE_RTT
+        if now > self.min_rtt_timeout {
+            self.mode = BbrMode::ProbeRtt;
+            self.min_rtt_us = 0x3fff_ffff; // Reset min_rtt
+            self.probe_rtt_done_timestamp = None;
+            self.probe_rtt_inflight_reached = false;
+            info!(min_rtt_us = report.rtt_sample_us, "Entering PROBE_RTT mode");
+        }
+    }
+
+    /// Handle PROBE_RTT state
+    fn handle_probe_rtt(&mut self, report: &Report) {
+        let now = Instant::now();
+
+        // Check if we've reached target inflight (4 packets)
+        if !self.probe_rtt_inflight_reached && report.packets_in_flight <= MIN_CWND_PACKETS {
+            self.probe_rtt_inflight_reached = true;
+            self.probe_rtt_done_timestamp = Some(now);
+            debug!("PROBE_RTT: reached target inflight");
+        }
+
+        // Exit PROBE_RTT after minimum duration
+        if let Some(done_time) = self.probe_rtt_done_timestamp {
+            let duration = now.duration_since(done_time);
+            if duration >= Duration::from_millis(PROBE_RTT_DURATION_MS) {
+                self.mode = BbrMode::ProbeBw;
+                self.probe_bw_state = 0; // Start in drain
+                self.probe_bw_timer = now;
+                self.min_rtt_timeout = now + self.probe_rtt_interval;
+                info!(min_rtt_us = self.min_rtt_us, "Exiting PROBE_RTT mode");
+            }
+        }
     }
 }
 
+impl GenericFlow for Bbr {
+    fn curr_cwnd(&self) -> u32 {
+        self.cwnd
+    }
+
+    fn set_cwnd(&mut self, cwnd: u32) {
+        self.cwnd = cwnd;
+    }
+
+    fn curr_pacing_rate(&self) -> Option<u64> {
+        Some(self.pacing_rate)
+    }
+
+    fn increase(&mut self, report: &Report) {
+        // Update bandwidth and RTT estimates
+        self.update_bandwidth(report);
+        self.update_min_rtt(report.rtt_sample_us);
+
+        // Handle state machine based on current mode
+        match self.mode {
+            BbrMode::ProbeBw => {
+                self.handle_probe_bw(report);
+            }
+            BbrMode::ProbeRtt => {
+                self.handle_probe_rtt(report);
+            }
+        }
+
+        // Update cwnd and pacing rate based on current state
+        let old_cwnd = self.cwnd;
+        let old_pacing_rate = self.pacing_rate;
+        self.cwnd = self.calculate_target_cwnd();
+        self.pacing_rate = self.calculate_pacing_rate();
+
+        if old_cwnd != self.cwnd || old_pacing_rate != self.pacing_rate {
+            debug!(
+                mode = match self.mode {
+                    BbrMode::ProbeBw => "PROBE_BW",
+                    BbrMode::ProbeRtt => "PROBE_RTT",
+                },
+                state = self.probe_bw_state,
+                old_cwnd = old_cwnd,
+                new_cwnd = self.cwnd,
+                old_pacing_Mbps = old_pacing_rate as f64 / 125_000.0,
+                new_pacing_Mbps = self.pacing_rate as f64 / 125_000.0,
+                bottleneck_bw_Mbps = self.bottleneck_bw / 125_000.0,
+                min_rtt_us = self.min_rtt_us,
+                "BBR update"
+            );
+        }
+    }
+
+    fn reduction(&mut self, _report: &Report) {
+        // BBR doesn't reduce cwnd on loss in the same way as loss-based CCAs
+        // It relies on bandwidth and RTT measurements instead
+        // We can optionally reduce bottleneck bandwidth estimate slightly
+        self.bottleneck_bw *= 0.95;
+        self.pacing_rate = self.calculate_pacing_rate();
+        debug!(
+            "Loss detected, reduced bottleneck_bw to {:.2} Mbps, pacing to {:.2} Mbps",
+            self.bottleneck_bw / 125_000.0,
+            self.pacing_rate as f64 / 125_000.0
+        );
+    }
+
+    fn reset(&mut self) {
+        // Reset to initial state on timeout
+        let now = Instant::now();
+        self.cwnd = self.init_cwnd;
+        self.mode = BbrMode::ProbeBw;
+        self.bottleneck_bw = 125_000.0;
+        self.pacing_rate = 125_000;
+        self.bottleneck_bw_timeout = now + self.probe_rtt_interval;
+        self.min_rtt_us = 1_000_000;
+        self.min_rtt_timeout = now + self.probe_rtt_interval;
+        self.probe_bw_state = 0;
+        self.probe_bw_timer = now;
+        self.probe_rtt_done_timestamp = None;
+        self.probe_rtt_inflight_reached = false;
+        info!("BBR flow reset");
+    }
+}
+
+pub struct BbrAlgorithm;
+
+impl GenericAlgorithm for BbrAlgorithm {
+    fn name(&self) -> &str {
+        "bbr"
+    }
+
+    fn create_flow(&self, init_cwnd: u32, mss: u32) -> Box<dyn GenericFlow> {
+        Box::new(Bbr::new(init_cwnd, mss))
+    }
+}
+
+// Legacy Portus-based implementation (DEPRECATED - kept for reference)
+// This code is no longer used. BBR now uses the GenericRunner with the above GenericFlow impl.
+/*
 impl<T: Ipc> CongAlg<T> for BbrConfig {
     type Flow = Bbr<T>;
 
@@ -377,3 +553,4 @@ impl<T: Ipc> portus::Flow for Bbr<T> {
         }
     }
 }
+*/

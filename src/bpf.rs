@@ -267,6 +267,39 @@ impl EbpfDatapath {
         self.send_user_update(flow_id, &update)
     }
 
+    pub fn update_pacing_rate(&mut self, flow_id: u64, pacing_rate: u64) -> Result<()> {
+        let update = UserUpdate {
+            cwnd_bytes: 0,
+            pacing_rate,
+            ssthresh: 0,
+            use_pacing: 1,
+            use_cwnd: 0,
+            use_ssthresh: 0,
+            _pad: 0,
+            flow_command: 0,
+        };
+        self.send_user_update(flow_id, &update)
+    }
+
+    pub fn update_cwnd_and_pacing(
+        &mut self,
+        flow_id: u64,
+        cwnd_bytes: u32,
+        pacing_rate: u64,
+    ) -> Result<()> {
+        let update = UserUpdate {
+            cwnd_bytes,
+            pacing_rate,
+            ssthresh: 0,
+            use_pacing: 1,
+            use_cwnd: 1,
+            use_ssthresh: 0,
+            _pad: 0,
+            flow_command: 0,
+        };
+        self.send_user_update(flow_id, &update)
+    }
+
     pub fn send_user_update(&mut self, flow_id: u64, update: &UserUpdate) -> Result<()> {
         let map = self
             .obj

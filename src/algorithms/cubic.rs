@@ -252,6 +252,7 @@ impl AlgorithmRunner for CubicRunner {
                         return Ok(Some(CwndUpdate {
                             flow_id,
                             cwnd_bytes: flow.cubic.curr_cwnd(),
+                            pacing_rate: None,
                         }));
                     }
 
@@ -306,6 +307,7 @@ impl AlgorithmRunner for CubicRunner {
                     Ok(Some(CwndUpdate {
                         flow_id,
                         cwnd_bytes: new_cwnd,
+                        pacing_rate: None,
                     }))
                 } else {
                     warn!("Received measurement for unknown flow: {:016x}", flow_id);

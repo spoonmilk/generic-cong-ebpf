@@ -90,12 +90,18 @@ fn main() -> Result<()> {
             // Let the algorithm handle the event
             match algorithm.handle_event(event) {
                 Ok(Some(update)) => {
-                    // Send cwnd update back to eBPF
-                    if let Err(e) = datapath.update_cwnd(update.flow_id, update.cwnd_bytes) {
-                        error!(
-                            "Failed to update cwnd for flow {:016x}: {}",
-                            update.flow_id, e
-                        );
+                    // Send cwnd and/or pacing rate update back to eBPF
+                    let result = match update.pacing_rate {
+                        Some(pacing_rate) => datapath.update_cwnd_and_pacing(
+                            update.flow_id,
+                            update.cwnd_bytes,
+                            pacing_rate,
+                        ),
+                        None => datapath.update_cwnd(update.flow_id, update.cwnd_bytes),
+                    };
+
+                    if let Err(e) = result {
+                        error!("Failed to update flow {:016x}: {}", update.flow_id, e);
                     }
                 }
                 Ok(None) => {
