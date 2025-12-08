@@ -168,13 +168,13 @@ static void send_measurement(struct sock *sk, u32 acked, u8 was_timeout,
         return;
     }
 
-    m = bpf_ringbuf_reserve(&measurements, sizeof(*m), 0);
-    if (!m) {
+    fr = bpf_map_lookup_elem(&flow_rate_map, &key);
+    if(!fr) {
         return;
     }
 
-    fr = bpf_map_lookup_elem(&flow_rate_map, &key);
-    if(!fr) {
+    m = bpf_ringbuf_reserve(&measurements, sizeof(*m), 0);
+    if (!m) {
         return;
     }
 
@@ -386,3 +386,5 @@ struct tcp_congestion_ops ebpf_generic = {
     .undo_cwnd = (void *)ebpf_generic_undo_cwnd,
     .name = "ebpf_ccp_generic",
 };
+
+char _license[] SEC("license") = "GPL";
