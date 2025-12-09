@@ -1,3 +1,6 @@
 [submodule "external/ebpfcca"]
 	path = external/ebpfcca
 	url = https://github.com/ebpfcca/ebpfcca.git
+[submodule "external/tcp-congestion-control"]
+	path = external/tcp-congestion-control
+	url = git@github.com:spoonmilk/tcp-congestion-control.git
