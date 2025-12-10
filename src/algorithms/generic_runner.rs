@@ -3,13 +3,19 @@ use std::collections::HashMap;
 use crate::bpf::DatapathEvent;
 use anyhow::anyhow;
 use ebpf_ccp_generic::{FlowKey, GenericAlgorithm, GenericFlow, Report};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::algorithms::{AlgorithmRunner, CwndUpdate};
 
+struct FlowState {
+    flow: Box<dyn GenericFlow>,
+    last_lost_pkts: u32,
+    last_cwnd: u32,
+}
+
 pub struct GenericRunner<A: GenericAlgorithm> {
     algorithm: A,
-    flows: HashMap<u64, Box<dyn GenericFlow>>,
+    flows: HashMap<u64, FlowState>,
     init_cwnd: u32,
     mss: u32,
 }
@@ -53,7 +59,12 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                     flow_id, init_cwnd, mss
                 );
                 let new_flow = self.algorithm.create_flow(init_cwnd, mss);
-                self.flows.insert(flow_id, new_flow);
+                let flow_state = FlowState {
+                    flow: new_flow,
+                    last_lost_pkts: 0,
+                    last_cwnd: init_cwnd,
+                };
+                self.flows.insert(flow_id, flow_state);
                 Ok(None)
             }
 
@@ -61,10 +72,10 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                 flow_id,
                 measurement,
             } => {
-                let flow = self
+                let flow_state = self
                     .flows
                     .get_mut(&flow_id)
-                    .ok_or_else(|| anyhow!("Unknown flow found"))?;
+                    .ok_or_else(|| anyhow!("Unknown flow {}", flow_id))?;
 
                 let flow_key = FlowKey {
                     saddr: measurement.flow.saddr,
@@ -103,20 +114,55 @@ impl<A: GenericAlgorithm> AlgorithmRunner for GenericRunner<A> {
                     rate_outgoing: measurement.rates.rate_outgoing,
                 };
 
+                // lost_pkts_sample is cumulative (tp->lost_out), not incremental
+                let new_loss = report.lost_pkts_sample > flow_state.last_lost_pkts;
+
+                let old_cwnd = flow_state.flow.curr_cwnd();
+
                 if report.was_timeout {
-                    flow.reset();
-                } else if report.lost_pkts_sample > 0 {
-                    flow.reduction(&report);
+                    warn!(
+                        "Flow {:016x}: timeout detected, resetting (cwnd: {} bytes)",
+                        flow_id, old_cwnd
+                    );
+                    flow_state.flow.reset();
+                    flow_state.last_lost_pkts = 0;
+                } else if new_loss {
+                    flow_state.flow.reduction(&report);
+                    flow_state.last_lost_pkts = report.lost_pkts_sample;
                 } else if report.bytes_acked > 0 {
-                    flow.increase(&report);
+                    flow_state.flow.increase(&report);
+                    // Reset loss counter when all losses are recovered
+                    if report.lost_pkts_sample == 0 {
+                        flow_state.last_lost_pkts = 0;
+                    }
                 }
 
-                // Return cwnd and optionally pacing rate update
-                Ok(Some(CwndUpdate {
-                    flow_id,
-                    cwnd_bytes: flow.curr_cwnd(),
-                    pacing_rate: flow.curr_pacing_rate(),
-                }))
+                let new_cwnd = flow_state.flow.curr_cwnd();
+                let pacing_rate = flow_state.flow.curr_pacing_rate();
+
+                if old_cwnd != new_cwnd {
+                    debug!(
+                        "Flow {:016x}: cwnd {} -> {} bytes (acked={}, rtt={}us, inflight={})",
+                        flow_id,
+                        old_cwnd,
+                        new_cwnd,
+                        report.bytes_acked,
+                        report.rtt_sample_us,
+                        report.bytes_in_flight
+                    );
+                }
+
+                // Only send update if cwnd actually changed
+                if new_cwnd != flow_state.last_cwnd || pacing_rate.is_some() {
+                    flow_state.last_cwnd = new_cwnd;
+                    Ok(Some(CwndUpdate {
+                        flow_id,
+                        cwnd_bytes: new_cwnd,
+                        pacing_rate,
+                    }))
+                } else {
+                    Ok(None)
+                }
             }
 
             DatapathEvent::FlowClosed { flow_id } => {

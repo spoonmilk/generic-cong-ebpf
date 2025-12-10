@@ -3,6 +3,7 @@
 
 #include "vmlinux.h"
 #include <bpf/bpf_endian.h>
+#include <bpf/bpf_core_read.h>
 
 #ifndef __always_inline
 #define __always_inline inline __attribute__((always_inline))
@@ -54,5 +55,23 @@ static inline unsigned int tcp_left_out(const struct tcp_sock *tp) {
 static inline unsigned int tcp_packets_in_flight(const struct tcp_sock *tp) {
   return tp->packets_out - tcp_left_out(tp) + tp->retrans_out;
 }
+
+static inline bool tcp_in_slow_start(const struct tcp_sock *tp)
+{
+	return tp->snd_cwnd < tp->snd_ssthresh;
+}
+
+static inline bool tcp_is_cwnd_limited(const struct sock *sk)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+
+	/* If in slow start, ensure cwnd grows to twice what was ACKed. */
+	if (tcp_in_slow_start(tp))
+		return tp->snd_cwnd < 2 * tp->max_packets_out;
+
+	return !!BPF_CORE_READ_BITFIELD(tp, is_cwnd_limited);
+}
+
+
 
 #endif

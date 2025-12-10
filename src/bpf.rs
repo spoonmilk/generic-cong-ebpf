@@ -63,7 +63,7 @@ pub struct FlowRates {
     pub rate_outgoing: u32,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 pub struct UserUpdate {
     pub cwnd_bytes: u32,
     pub pacing_rate: u64,

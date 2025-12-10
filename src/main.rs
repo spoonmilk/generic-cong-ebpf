@@ -101,7 +101,7 @@ fn main() -> Result<()> {
                     };
 
                     if let Err(e) = result {
-                        error!("Failed to update flow {:016x}: {}", update.flow_id, e);
+                        error!("Failed to update flow {:016x}: {:?}", update.flow_id, e);
                     }
                 }
                 Ok(None) => {

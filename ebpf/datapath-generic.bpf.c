@@ -242,26 +242,26 @@ static void apply_user_updates(struct sock *sk) {
     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 }
 
-// TODO: Figure out how to include both cong_avoid and cong_control? Needed? Idk
-//
-// SEC("struct_ops/ebpf_generic_cong_avoid")
-// void BPF_PROG(ebpf_generic_cong_avoid, struct sock *sk, __u32 ack,
-//               __u32 acked) {
-//     struct flow_key key;
-//     struct flow *fl;
-// 
-//     get_flow_key(sk, &key);
-//     fl = bpf_map_lookup_elem(&flow_map, &key);
-//     if (!fl) {
-//         return;
-//     }
-// 
-//     fl->bytes_delivered_since_last += acked;
-//     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
-// 
-//     send_measurement(sk, acked, 0, 0);
-//     apply_user_updates(sk);
-// }
+
+SEC("struct_ops/ebpf_generic_cong_avoid")
+void BPF_PROG(ebpf_generic_cong_avoid, struct sock *sk, __u32 ack,
+              __u32 acked) {
+    struct tcp_sock *tp = tcp_sk(sk);
+    struct flow_key key;
+    struct flow *fl;
+
+    get_flow_key(sk, &key);
+    fl = bpf_map_lookup_elem(&flow_map, &key);
+    if (!fl) {
+        return;
+    }
+
+    fl->bytes_delivered_since_last += acked;
+    bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
+
+    send_measurement(sk, acked, 0, 0);
+    apply_user_updates(sk);
+}
 
 SEC("struct_ops/ebpf_generic_cong_control")
 void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
@@ -278,9 +278,11 @@ void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
         return;
     }
 
-    fl->bytes_delivered_since_last += rs->delivered * tp->mss_cache;
+    // Calculate acked bytes from rate sample
+    u32 acked_bytes = rs->delivered * tp->mss_cache;
+    fl->bytes_delivered_since_last += acked_bytes;
 
-    // Update rates
+    // Update rates every 100ms
     now = bpf_ktime_get_ns();
     elapsed_ns = now - fl->last_rate_sample_ns;
     if (elapsed_ns >= 100000000) {
@@ -300,9 +302,10 @@ void BPF_PROG(ebpf_generic_cong_control, struct sock *sk,
 
     bpf_map_update_elem(&flow_map, &key, fl, BPF_ANY);
 
-    u32 acked = rs->acked_sacked;
-    send_measurement(sk, acked, 0, 1);
-    apply_user_updates(sk);
+    if (acked_bytes > 0) {
+        send_measurement(sk, acked_bytes, 0, 0);
+        apply_user_updates(sk);
+    }
 }
 
 SEC("struct_ops/ebpf_generic_cwnd_event")
@@ -340,6 +343,8 @@ void BPF_PROG(ebpf_generic_cwnd_event, struct sock *sk,
     if (event == CA_EVENT_LOSS || event == CA_EVENT_CWND_RESTART ||
         event == CA_EVENT_ECN_IS_CE) {
         send_measurement(sk, acked, was_timeout, 2);
+        // Apply userspace updates after loss events
+        apply_user_updates(sk);
     }
 }
 
@@ -389,6 +394,9 @@ struct tcp_congestion_ops ebpf_ccp_gen = {
     .init = (void *)ebpf_generic_init,
     .release = (void *)ebpf_generic_release,
     .ssthresh = (void *)ebpf_generic_ssthresh,
+    // NOTE: WHEN BOTH CONG_AVOID AND CONG_CONTROL REGISTERED,
+    // CONG_CONTROL OVERRIDES CONG_CONTROL!
+    .cong_avoid = (void *)ebpf_generic_cong_avoid,
     .cong_control = (void *)ebpf_generic_cong_control,
     .set_state = (void *)ebpf_generic_set_state,
     .cwnd_event = (void *)ebpf_generic_cwnd_event,

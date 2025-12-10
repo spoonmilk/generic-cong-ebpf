@@ -47,8 +47,10 @@ impl Cubic {
             self.wtcp = self.cwnd
         }
 
-        let d_min = self.d_min.unwrap_or(Duration::from_millis(100));
-        let t = (Instant::now() - d_min - self.epoch_start.unwrap()).as_secs_f64();
+        let _d_min = self.d_min.unwrap_or(Duration::from_millis(100));
+        let t = Instant::now()
+            .duration_since(self.epoch_start.unwrap())
+            .as_secs_f64();
         let target = self.origin_point + self.c * ((t - self.k) * (t - self.k) * (t - self.k));
         if target > self.cwnd {
             self.cnt = self.cwnd / (target - self.cwnd);
@@ -141,10 +143,11 @@ impl GenericAlgorithm for CubicAlgorithm {
     }
 
     fn create_flow(&self, init_cwnd: u32, mss: u32) -> Box<dyn GenericFlow> {
+        let init_cwnd_pkts = init_cwnd / mss;
         Box::new(Cubic {
             pkt_size: mss,
-            init_cwnd,
-            cwnd: f64::from(init_cwnd),
+            init_cwnd: init_cwnd_pkts,
+            cwnd: f64::from(init_cwnd_pkts),
             cwnd_cnt: 0.0,
             tcp_friendliness: true,
             beta: 0.7,
